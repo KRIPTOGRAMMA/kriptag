@@ -36,7 +36,9 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/images/*"]
+        "scope": [
+          "$APPDATA/images/*"
+        ]
       }
     }
   },
@@ -47,7 +49,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "appimage"
+    ],
     "externalBin": [
       "binaries/llamafile",
       "binaries/llamafile-wrapper",
@@ -59,6 +64,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Productivity",
+    "shortDescription": "Local-first organiser with optional AI",
+    "longDescription": "Tasks, notes and activity tracking in one local application. Notes support Markdown, [[wiki links]] and a graph of connections; tasks have a list and a board, subtasks, deadlines and recurrence. Activity tracking and the pomodoro timer feed a dashboard of where the time went. All data stays on this computer; AI features are optional and can run against a local model.",
+    "publisher": "kriptogramma",
+    "copyright": "Copyright © 2026 kriptogramma",
+    "licenseFile": "../LICENSE"
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "kriptag",
   "version": "0.6.0",
-  "description": "",
+  "description": "Local-first organiser with optional AI",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -13,7 +13,7 @@
     "test:e2e": "playwright test",
     "tauri": "tauri"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.4",
@@ -42,5 +42,6 @@
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vitest": "^4.1.10"
-  }
+  },
+  "author": "kriptogramma"
 }

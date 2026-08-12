@@ -1,0 +1,13 @@
+Kriptag
+Copyright 2026 kriptogramma
+
+This product includes software developed as part of the Tauri project
+(https://tauri.app), licensed under Apache-2.0 OR MIT.
+
+Bundled sidecar binaries, distributed under their own terms:
+  - llamafile (https://github.com/Mozilla-Ocho/llamafile) — Apache-2.0
+  - whisper.cpp (https://github.com/ggerganov/whisper.cpp) — MIT
+
+Space Grotesk, used for the application wordmark, is licensed under the
+SIL Open Font License 1.1. The licence text ships in
+src/assets/SpaceGrotesk-OFL.txt.

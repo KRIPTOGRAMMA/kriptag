@@ -1,9 +1,10 @@
 [package]
 name = "kriptag"
 version = "0.6.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Local-first organiser with optional AI"
+authors = ["kriptogramma"]
 edition = "2021"
+license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
