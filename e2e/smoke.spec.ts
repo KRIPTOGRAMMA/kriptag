@@ -803,7 +803,11 @@ test("онбординг: страница биндов композитора �
   for (const flag of ["--quick-task", "--quick-note", "--quick-clip", "--quick-pinned"]) {
     await expect(conf, `в конфиге нет ${flag}`).toContainText(flag);
   }
-  await expect(page.locator(".conf-block pre").nth(1), "нет варианта для Sway").toContainText("bindsym Control+Shift+n exec kriptag");
+  // hyprland.lua — отдельный формат, а не вариант .conf: строка `bind = ...`,
+  // вставленная в него, не делает ничего. Формат сверен с рабочим конфигом.
+  await expect(page.locator(".conf-block pre").nth(1), "нет варианта для hyprland.lua")
+    .toContainText('hl.bind("CTRL + SHIFT + N", hl.dsp.exec_cmd(kriptag .. " --quick-task"))');
+  await expect(page.locator(".conf-block pre").nth(2), "нет варианта для Sway").toContainText("bindsym Control+Shift+n exec kriptag");
 });
 
 test("задача: создание, редактирование, выполнение, удаление из истории", async ({ page }) => {

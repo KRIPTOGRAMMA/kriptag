@@ -54,6 +54,17 @@
     .map(b => `bindsym ${b.mods.split(" ").map(m => m === "CTRL" ? "Control" : "Shift").join("+")}+${b.key.toLowerCase()} exec kriptag ${b.flag}`)
     .join("\n");
 
+  // hyprlang is not the only way to configure Hyprland: hyprland.lua (hyprls /
+  // hypr-lua) is a separate format, not a variant of the .conf syntax, and a
+  // `bind = ...` line pasted into it does nothing. The path is bound to a local
+  // first, the way those configs are usually written, so changing it later means
+  // editing one line rather than four.
+  const luaConf = [
+    'local kriptag = "kriptag"',
+    "",
+    ...QUICK_BINDS.map(b => `hl.bind("${b.mods.replace(" ", " + ")} + ${b.key}", hl.dsp.exec_cmd(kriptag .. " ${b.flag}"))`),
+  ].join("\n");
+
   let copied = $state<string | null>(null);
   async function copyConf(text: string) {
     try {
@@ -207,6 +218,13 @@
           <button class="btn-sm" onclick={() => copyConf(hyprConf)}>{copied === hyprConf ? t("Скопировано ✓") : t("Копировать")}</button>
         </div>
         <pre>{hyprConf}</pre>
+      </div>
+      <div class="conf-block">
+        <div class="conf-head">
+          <span class="muted">Hyprland (Lua) — <code>~/.config/hypr/hyprland.lua</code></span>
+          <button class="btn-sm" onclick={() => copyConf(luaConf)}>{copied === luaConf ? t("Скопировано ✓") : t("Копировать")}</button>
+        </div>
+        <pre>{luaConf}</pre>
       </div>
       <div class="conf-block">
         <div class="conf-head">
