@@ -91,28 +91,44 @@ async function fetchWhisper({ triple, exe }) {
 }
 
 
-// The wrapper exists because llamafile insists on writing into the working
-// directory; it is a shell script on Unix and a .cmd on Windows.
+// The wrapper exists because llamafile writes into the working directory, so it
+// is launched from /tmp rather than from wherever the app happens to be.
+//
+// On Windows there is no wrapper at all. Tauri names a sidecar
+// `<name>-<triple>.exe`, and a .exe has to be a real PE binary — a batch script
+// under that name simply fails to start, which is what the first version of this
+// script produced. Nothing is lost: the cwd trick is a Unix concern, and
+// llamafile is an APE binary that Windows runs directly.
 async function writeWrapper({ triple, exe }) {
+  if (process.platform === "win32") {
+    console.log("  = llamafile-wrapper not needed on Windows (llamafile runs directly)");
+    return;
+  }
   const dest = join(OUT, `llamafile-wrapper-${triple}${exe}`);
   if (await exists(dest)) { console.log(`  = llamafile-wrapper already here`); return; }
-  if (process.platform === "win32") {
-    await writeFile(dest, [
-      "@echo off",
-      `"%~dp0llamafile-${triple}${exe}" %*`,
-      "",
-    ].join("\r\n"));
-  } else {
-    await writeFile(dest, [
-      "#!/bin/sh",
-      'DIR="$(dirname "$0")"',
-      "cd /tmp",
-      `exec "$DIR/llamafile-${triple}${exe}" "$@"`,
-      "",
-    ].join("\n"));
-  }
+  await writeFile(dest, [
+    "#!/bin/sh",
+    'DIR="$(dirname "$0")"',
+    "cd /tmp",
+    `exec "$DIR/llamafile-${triple}${exe}" "$@"`,
+    "",
+  ].join("\n"));
   await chmod(dest, 0o755);
   console.log(`  + llamafile-wrapper-${triple}${exe}`);
+}
+
+// externalBin lists files the bundler must find, and the wrapper is not one of
+// them on Windows. Left in place it aborts the Windows build with a missing
+// sidecar — the same way whisper-cli did.
+async function dropEntry(match, why) {
+  const confPath = "src-tauri/tauri.conf.json";
+  const conf = JSON.parse(await readFile(confPath, "utf8"));
+  const before = conf.bundle.externalBin.length;
+  conf.bundle.externalBin = conf.bundle.externalBin.filter((b) => !b.includes(match));
+  if (conf.bundle.externalBin.length !== before) {
+    await writeFile(confPath, JSON.stringify(conf, null, 2) + "\n");
+    console.log(`  ~ ${match} dropped from externalBin — ${why}.`);
+  }
 }
 
 const target = hostTarget();
@@ -128,14 +144,10 @@ await writeWrapper(target);
 // backend already handles its absence at runtime — voice.rs returns an error the
 // UI shows — so the package is simply one without voice input.
 if (missing.some((m) => m.startsWith("whisper-cli"))) {
-  const confPath = "src-tauri/tauri.conf.json";
-  const conf = JSON.parse(await readFile(confPath, "utf8"));
-  const before = conf.bundle.externalBin.length;
-  conf.bundle.externalBin = conf.bundle.externalBin.filter((b) => !b.includes("whisper-cli"));
-  if (conf.bundle.externalBin.length !== before) {
-    await writeFile(confPath, JSON.stringify(conf, null, 2) + "\n");
-    console.log("\n  ~ whisper-cli dropped from externalBin — building without voice input.");
-  }
+  await dropEntry("whisper-cli", "building without voice input");
+}
+if (process.platform === "win32") {
+  await dropEntry("llamafile-wrapper", "not used on Windows");
 }
 
 if (missing.length) {

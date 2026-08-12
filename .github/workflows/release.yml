@@ -70,6 +70,24 @@ jobs:
       - name: Fetch sidecars
         run: node scripts/fetch-sidecars.mjs
 
+      # A bare "exit code 1" from tauri-action says nothing about what failed, so
+      # the state it depends on is printed first: which sidecars exist, and what
+      # externalBin ended up as after the fetch step edited it.
+      - name: Show sidecar state
+        shell: bash
+        run: |
+          echo "--- src-tauri/binaries ---"
+          ls -la src-tauri/binaries/ || echo "(no directory)"
+          echo "--- externalBin ---"
+          node -e "console.log(JSON.stringify(require('./src-tauri/tauri.conf.json').bundle.externalBin))"
+
+      # Run the frontend build on its own. tauri-action calls it through
+      # beforeBuildCommand, where a failure is reported only as the exit code of
+      # the whole build — this separates "the frontend broke" from "the bundler
+      # broke".
+      - name: Build frontend
+        run: npm run build
+
       - name: Build
         uses: tauri-apps/tauri-action@v0
         env:
