@@ -587,8 +587,6 @@
     align-items: center;
     gap: 6px;
     margin-bottom: 12px;
-    /* see Tasks.svelte: room for the window buttons */
-    padding-right: var(--wincontrols-w);
   }
 
   .month-label {

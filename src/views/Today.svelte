@@ -195,6 +195,9 @@
 {/if}
 
 <style>
+  /* The same ceiling as Tasks: this screen is a list of cards too, and letting
+     it run to 1900px would put it out of step with the view it mirrors. The
+     padding stays outside the limit so the content is centred, not the padding. */
   .today-view {
     padding: 20px 24px;
     height: 100%;
@@ -204,14 +207,18 @@
     gap: 16px;
   }
 
+  .today-view > * {
+    width: 100%;
+    max-width: 1200px;
+    margin-inline: auto;
+  }
+
   .today-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 10px;
-    /* see Tasks.svelte: room for the window buttons */
-    padding-right: var(--wincontrols-w);
   }
 
   .today-header h2 {

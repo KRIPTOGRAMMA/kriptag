@@ -1,5 +1,29 @@
+/* The wordmark face. Subset to the seven letters of KRIPTAG, which is why it is
+   876 bytes rather than the ~100 KB of the full family — it is a logo, not a text
+   font, and nothing else in the app may use it.
+
+   Bundled rather than linked: this is a local application with no guaranteed
+   network, and a font-family naming a face that is not installed falls back to
+   system-ui silently — the rule would look right and render exactly as before.
+   Space Grotesk is under the SIL Open Font License; the licence ships beside the
+   file in src/assets/. */
+@font-face {
+    font-family: "Kriptag Wordmark";
+    src: url("./assets/kriptag-logo.woff2") format("woff2");
+    font-weight: 700;
+    font-style: normal;
+    /* The wordmark is painted immediately in the fallback and reflowed when the
+       face arrives; block would leave the corner of the window empty first. */
+    font-display: swap;
+}
+
 /* ===== Design tokens ===== */
 :root {
+    /* Tells the engine which variant to draw the parts it owns: the popup of a
+       <select>, scrollbars, the calendar inside <input type="date">. Without it
+       those stay light on a dark theme, however the tokens are set. */
+    color-scheme: light;
+
     --bg-primary: #ffffff;
     /* The neutrals lean towards violet instead of pure grey. The shift is small
        — visible only next to #f5f5f5 — but it takes the "default grey" feel off
@@ -15,19 +39,20 @@
     /* The far end of the .btn-primary gradient. Kept distinct from --accent:
        when the two are equal the gradient degenerates into a flat fill. */
     --accent-secondary: #a855f7;
+    /* Text on top of the accent; recomputed from a custom accent by theme.ts. */
+    --on-accent: #ffffff;
     --danger: #ef4444;
     --success: #22c55e;
     --radius: 6px;
     --radius-lg: 10px;
 
-    /* Width of the window-button block: three 28px buttons + 2px gaps + a 6px
-       edge margin. A token rather than a number because .content reserves the
-       space for them on the right, and resizing the buttons must not leave that
-       offset out of step with reality. */
-    --wincontrols-w: 98px;
 
-    /* Categories — a validated palette (the slot order is fixed) */
-    --cat-work: #2a78d6;
+    /* Categories — a validated palette (the slot order is fixed).
+       cat-work was #2a78d6 until the solid chip arrived: filled with that blue,
+       neither a white nor a dark label cleared 4.5 (the best was 4.42).
+       Darkened by the smallest step that passes, 4.67 — same hue, and it stays
+       legible as text on white where it is also used. */
+    --cat-work: #2874d0;
     --cat-study: #1baf7a;
     --cat-home: #eda100;
     --cat-health: #008300;
@@ -41,6 +66,8 @@
 }
 
 .dark {
+    color-scheme: dark;
+
     --bg-primary: #0f0f0f;
     --bg-secondary: #191722;
     --bg-card: #1c1a24;
@@ -51,6 +78,7 @@
     --accent: #6366f1;
     --accent-hover: #818cf8;
     --accent-secondary: #c084fc;
+    --on-accent: #ffffff;
     --danger: #ef4444;
     --success: #22c55e;
 
@@ -130,8 +158,19 @@ input:focus, select:focus, textarea:focus {
 /* ===== Button variants ===== */
 .btn-primary {
     background: linear-gradient(135deg, var(--accent), var(--accent-secondary));
-    color: #fff;
-    border-color: transparent;
+    color: var(--on-accent);
+    /* No border at all, rather than a transparent one. The base rule sets
+       `border: 1px solid`, and a transparent border still occupies its 1px: with
+       the default background-clip: border-box the gradient is painted *under* that
+       ring, so its end colours smear along the edge and read as a seam around the
+       button. The other variants keep the transparent border on purpose — they
+       have no fill to smear, and the 1px keeps them the same size as the buttons
+       beside them.
+
+       The padding compensates so the button does not shrink by 2px in each axis
+       and stop lining up with its neighbours. */
+    border: none;
+    padding: 6px 13px;
     font-weight: 500;
 }
 .btn-primary:hover { background: linear-gradient(135deg, var(--accent-hover), var(--accent-secondary)); }
@@ -143,6 +182,13 @@ input:focus, select:focus, textarea:focus {
 .btn-ghost:hover { background: var(--bg-hover); }
 
 .btn-sm { padding: 2px 8px; font-size: 12px; }
+
+/* .btn-primary drops the border, so a small primary button would come out 2px
+   shorter and narrower than the plain .btn-sm beside it — measured at 18px against
+   20. The padding takes the missing pixel back on each side.
+   Declared after .btn-sm so it wins on `.btn-sm.btn-primary`, whichever order the
+   two classes appear in the markup. */
+.btn-sm.btn-primary { padding: 3px 9px; }
 
 .btn-icon {
     padding: 3px 6px;
@@ -193,6 +239,22 @@ input:focus, select:focus, textarea:focus {
 
 /* Category chip: the slot colour plus a light backing of the same hue */
 .chip-cat { color: var(--cat, var(--text-secondary)); background: color-mix(in srgb, var(--cat, #888) 12%, transparent); }
+
+/* Two weights of the same chip (v0.9.99). Loudness means "this is applied right
+   now": the category filter paints its selected chip solid, while the chips on
+   task rows — where four can sit side by side — step back to an outline.
+   --on-cat is computed per chip by onAccentText(), never hardcoded: categories
+   are user-editable DB rows, so the fill can be any hex, and white text is
+   unreadable on a light one. */
+.chip-cat--solid { color: var(--on-cat, #fff); background: var(--cat, #888); font-weight: 500; }
+.chip-cat--edge {
+    color: var(--cat, var(--text-secondary));
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--cat, #888) 45%, transparent);
+    /* The border must not add to the chip's height, or an outlined chip would sit
+       2px taller than a filled one in the same row. */
+    padding: 0 7px;
+}
 .chip-cat.cat-work   { --cat: var(--cat-work); }
 .chip-cat.cat-study  { --cat: var(--cat-study); }
 .chip-cat.cat-home   { --cat: var(--cat-home); }
@@ -203,6 +265,39 @@ input:focus, select:focus, textarea:focus {
 .dark .chip-tag { color: #7dd3fc; }
 
 .chip-danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* ===== Stat tiles ===== */
+/* The Dashboard had numbers but no counters: answering "how many today" meant
+   reading a panel. A tile puts the number first. */
+.tile {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 10px 12px;
+}
+
+.tile .tile-n {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+    /* Counters change as the day goes on; without this the digits are
+       proportional and the number jitters sideways on every update. */
+    font-variant-numeric: tabular-nums;
+}
+
+.tile .tile-l {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
+/* Semantic, deliberately not the accent: recolouring the theme must not change
+   what "overdue" looks like. */
+.tile.tile-warn .tile-n {
+    color: var(--danger);
+}
+
 
 .empty {
     padding: 40px 16px;
@@ -250,7 +345,16 @@ input:focus, select:focus, textarea:focus {
    NB: .active-toggle in Tasks.svelte is NOT this element. The same class name sits
    there on the smart-list chips and paints them --bg-hover rather than the accent. */
 .seg {
-    display: inline-flex;
+    /* A grid of equal columns rather than inline-flex. Each segment used to be
+       sized by its own label, so "Список" came out 59.8px against "Доска" at 55.6
+       and the pair sat visibly lopsided — the same tilt in History/Trash and in
+       the Dashboard toggle. Flex cannot fix it here: the container shrink-wraps
+       its content, so there is no spare row for flex-grow to divide and the
+       segments stay on their text. 1fr columns make every segment the width of
+       the widest label, which is what makes the control read as symmetrical. */
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
@@ -258,11 +362,26 @@ input:focus, select:focus, textarea:focus {
 
 .seg button {
     border: none;
-    border-radius: 0;
     background: transparent;
     font-size: 12px;
     padding: 4px 10px;
     color: var(--text-secondary);
+    /* The end segments pick up the container's rounding. overflow:hidden on .seg
+       does NOT clip a child's own background against that radius — the fill of an
+       active first or last segment kept square corners and visibly jutted out of
+       the rounded frame. The -1px accounts for the container's own border, so the
+       fill follows the inner edge of the curve rather than sitting outside it. */
+    border-radius: 0;
+}
+
+.seg button:first-child {
+    border-top-left-radius: calc(var(--radius) - 1px);
+    border-bottom-left-radius: calc(var(--radius) - 1px);
+}
+
+.seg button:last-child {
+    border-top-right-radius: calc(var(--radius) - 1px);
+    border-bottom-right-radius: calc(var(--radius) - 1px);
 }
 
 /* Separators rather than borders: otherwise the edges double up where two
@@ -280,7 +399,7 @@ input:focus, select:focus, textarea:focus {
 
 .seg button.active {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-weight: 500;
 }
 
@@ -296,6 +415,61 @@ input:focus, select:focus, textarea:focus {
 .seg--tabs button {
     font-size: 13px;
     padding: 7px 13px;
+}
+
+/* ONE place uses this: the Settings tabs. Do not "unify" it away.
+   An underline was rejected for toggles in general, and that ruling stands — it
+   underlines the edge of whatever header the toggle sits in rather than its own
+   block. The Settings tabs are the exception the ruling allows for: seven of
+   them own a full line above a panel of their own, so the line has a block to
+   belong to. Everything else keeps the shared frame of .seg. */
+.seg--underline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    overflow: visible;
+}
+
+.seg--underline button {
+    position: relative;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 7px 13px;
+}
+
+/* The separator rules of .seg are keyed to `button + button`; without this the
+   underline variant would inherit dividers it has no frame to sit in. */
+.seg--underline button + button {
+    border-left: none;
+}
+
+.seg--underline button:not(.active):hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.seg--underline button.active {
+    background: transparent;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Sits on the container's own border, so the line reads as the tab claiming that
+   edge rather than as a detached bar under the label. */
+.seg--underline button.active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
 }
 
 /* ===== Overlays and modals ===== */

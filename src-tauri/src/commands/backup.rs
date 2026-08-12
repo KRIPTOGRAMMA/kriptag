@@ -150,7 +150,7 @@ pub async fn preview_import(
     let mut buf = Vec::new();
     archive.by_name("data.db")?.read_to_end(&mut buf)?;
 
-    let tmp = std::env::temp_dir().join(format!("ai-notes-preview-{}.db", uuid::Uuid::new_v4()));
+    let tmp = std::env::temp_dir().join(format!("kriptag-preview-{}.db", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, &buf)?;
     let result = preview_from_file(pool.inner(), &tmp).await;
     let _ = std::fs::remove_file(&tmp);
@@ -163,7 +163,7 @@ async fn preview_from_file(live: &sqlx::SqlitePool, file: &Path) -> AppResult<Im
     let url = format!("sqlite:{}?mode=ro", file.display());
     let snap = sqlx::SqlitePool::connect(&url)
         .await
-        .map_err(|_| AppError::Other("Файл не является базой данных AI Notes.".into()))?;
+        .map_err(|_| AppError::Other("Файл не является базой данных Kriptag.".into()))?;
 
     let result = (async {
         let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks").fetch_one(&snap).await?;
@@ -229,13 +229,13 @@ async fn validate_import_db(staging: &Path) -> AppResult<()> {
     let url = format!("sqlite:{}?mode=ro", staging.display());
     let pool = sqlx::SqlitePool::connect(&url)
         .await
-        .map_err(|_| AppError::Other("Файл не является базой данных AI Notes.".into()))?;
+        .map_err(|_| AppError::Other("Файл не является базой данных Kriptag.".into()))?;
 
     let result = (async {
         let check: String = sqlx::query_scalar("PRAGMA integrity_check")
             .fetch_one(&pool)
             .await
-            .map_err(|_| AppError::Other("Файл не является базой данных AI Notes.".into()))?;
+            .map_err(|_| AppError::Other("Файл не является базой данных Kriptag.".into()))?;
         if check != "ok" {
             return Err(AppError::Other("Архив повреждён: база не проходит проверку целостности.".into()));
         }
@@ -249,7 +249,7 @@ async fn validate_import_db(staging: &Path) -> AppResult<()> {
             .await?;
             if found.is_none() {
                 return Err(AppError::Other(
-                    "Это база данных другого приложения: в ней нет таблиц AI Notes.".into(),
+                    "Это база данных другого приложения: в ней нет таблиц Kriptag.".into(),
                 ));
             }
         }
@@ -305,7 +305,7 @@ pub async fn auto_backup_impl(
 
     let dir = PathBuf::from(&backup_dir);
     let now = chrono::Local::now();
-    let filename = format!("ai-notes-backup-{}.zip", now.format("%Y-%m-%d-%H%M"));
+    let filename = format!("kriptag-backup-{}.zip", now.format("%Y-%m-%d-%H%M"));
     let path = dir.join(&filename);
 
     export_impl(pool, data_dir, path.to_str().unwrap()).await?;
@@ -314,7 +314,7 @@ pub async fn auto_backup_impl(
     let mut entries: Vec<_> = fs::read_dir(&dir)?
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_name().to_string_lossy().starts_with("ai-notes-backup-")
+            e.file_name().to_string_lossy().starts_with("kriptag-backup-")
                 && e.file_name().to_string_lossy().ends_with(".zip")
         })
         .collect();
@@ -421,7 +421,7 @@ mod tests {
     use chrono::Utc;
 
     fn tmp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}-{}", name, uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}-{}", name, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -841,7 +841,7 @@ mod tests {
 
         // Simulate 4 old backups
         for i in 1..=4 {
-            let name = format!("ai-notes-backup-2026-07-{:02}0-1200.zip", i);
+            let name = format!("kriptag-backup-2026-07-{:02}0-1200.zip", i);
             std::fs::write(backup_dir.join(&name), b"fake-zip").unwrap();
         }
 
@@ -855,7 +855,7 @@ mod tests {
         entries.sort_by_key(|e| e.file_name());
 
         let backup_count = entries.iter().filter(|e| {
-            e.file_name().to_string_lossy().starts_with("ai-notes-backup-")
+            e.file_name().to_string_lossy().starts_with("kriptag-backup-")
         }).count();
         assert_eq!(backup_count, 3, "должно быть 3 бэкапа после ротации");
 

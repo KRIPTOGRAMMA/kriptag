@@ -214,12 +214,19 @@ describe("покрытие словаря по размеченным файла
   //   `{t(item.label)}`). The marker lifts the check from the block up to the nearest
   //   `];` line and must be explicit: otherwise the test either stays silent about
   //   real omissions or demands "fixing" working code.
+  //   `i18n-ok-line` is the same permission for exactly one following line, for a
+  //   string that is not in a list at all: the language names on the first step of
+  //   the onboarding are written in their own language on purpose, so "Русский"
+  //   must never be translated. The array form cannot express that — it would skip
+  //   to the next `];`, which in markup may be the end of the file.
   it("в размеченных файлах нет кириллицы вне t()", () => {
     const offenders: string[] = [];
     for (const file of LOCALIZED) {
       let src = SOURCES[file] ?? "";
       src = src.replace(/<style[\s\S]*?<\/style>/g, "");
+      src = src.replace(/<!--\s*i18n-ok-line[^>]*-->/g, "@@I18N_OK_LINE@@");
       src = src.replace(/<!--[\s\S]*?-->/g, "");
+      src = src.replace(/@@I18N_OK_LINE@@/g, "i18n-ok-line");
       // The order matters: the `/* i18n-ok */` marker is protected BEFORE block
       // comments are stripped, otherwise it is removed along with them and the block
       // counts as a violation again.
@@ -235,7 +242,10 @@ describe("покрытие словаря по размеченным файла
       // violation.
       src = src.replace(/(?<![\w.])tr?\((["'])(?:(?!\1).)*\1/g, "t()");
       let skipUntilClose = false;
+      let skipNextLine = false;
       for (const [i, line] of src.split("\n").entries()) {
+        if (skipNextLine) { skipNextLine = false; continue; }
+        if (line.includes("i18n-ok-line")) { skipNextLine = true; continue; }
         if (line.includes("i18n-ok")) { skipUntilClose = true; continue; }
         if (skipUntilClose) {
           if (/^\s*\];/.test(line)) skipUntilClose = false;

@@ -1,4 +1,4 @@
-// The `ai-notes --status` CLI mode: a short-lived process for a waybar custom
+// The `kriptag --status` CLI mode: a short-lived process for a waybar custom
 // module (or any other status bar). It opens the DB read-only (WAL allows reading
 // in parallel with the running app), prints a single JSON line to stdout and
 // exits — Tauri is never started and single-instance is not disturbed.
@@ -28,7 +28,7 @@ pub struct StatusPayload {
 fn empty_payload() -> StatusPayload {
     StatusPayload {
         text: String::new(),
-        tooltip: format!("AI Notes: {}",
+        tooltip: format!("Kriptag: {}",
             crate::i18n::tr("БД не найдена", crate::i18n::lang_from_setting(""))),
         class: "off".into(),
         alt: String::new(),
@@ -270,7 +270,7 @@ async fn open_readonly() -> Option<SqlitePool> {
     // The same path Tauri's app.path().app_data_dir() yields: data_dir plus the
     // identifier (see tauri.conf.json). mode=ro means we neither create the file
     // nor touch the schema.
-    let path = dirs::data_dir()?.join("com.ainotes.app").join("data.db");
+    let path = dirs::data_dir()?.join("com.kriptag.app").join("data.db");
     if !path.exists() {
         return None;
     }

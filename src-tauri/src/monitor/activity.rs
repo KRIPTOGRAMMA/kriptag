@@ -298,7 +298,7 @@ async fn notify_return(app: &tauri::AppHandle, pool: &SqlitePool, away_mins: i64
         },
     };
 
-    crate::notifier::scheduler::send_notification(app, pool, "activity_return", "AI Notes", &body).await;
+    crate::notifier::scheduler::send_notification(app, pool, "activity_return", "Kriptag", &body).await;
 }
 
 // The nearest visible task (by deadline, then by priority) in one of the given

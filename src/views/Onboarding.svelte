@@ -4,7 +4,8 @@
   import type { AppSettings } from "../lib/types";
   import ModelDownloader from "../lib/components/ModelDownloader.svelte";
 
-  import { t } from "../lib/i18n.svelte";
+  import { t, i18n } from "../lib/i18n.svelte";
+  import type { Lang } from "../lib/i18n";
   interface Props {
     settings: AppSettings;
     isWayland: boolean;
@@ -12,12 +13,59 @@
   }
   let { settings, isWayland, onDone }: Props = $props();
 
-  // Step 3 (Wayland) is shown on Wayland only. Step 6 (voice input) sits before the
-  // closing one and is entirely optional: nothing here has to be downloaded for the
-  // app to work, the step just makes the feature discoverable at all.
-  const steps = isWayland ? [1, 2, 3, 4, 6, 5] : [1, 2, 4, 6, 5];
+  // Step 0 (language) comes first for a reason: every screen after it is text, so
+  // choosing the language later would mean reading the whole onboarding in the
+  // wrong one. Step 3 (Wayland monitoring) and step 7 (compositor binds) are shown
+  // on Wayland only. Step 6 (voice input) sits before the closing one and is
+  // entirely optional: nothing here has to be downloaded for the app to work, the
+  // step just makes the feature discoverable at all.
+  const steps = isWayland ? [0, 1, 2, 3, 4, 7, 6, 5] : [0, 1, 2, 4, 6, 5];
   let stepIdx = $state(0);
   let step = $derived(steps[stepIdx]);
+
+  // Seeded from the language already in effect (i18n.init detected it from the
+  // system locale), so the step confirms a sensible default rather than starting
+  // blank. Applied immediately on click — the point of choosing it first is that
+  // the rest of the onboarding is already in that language.
+  let lang = $state<Lang>(i18n.lang);
+  function chooseLang(code: Lang) {
+    lang = code;
+    i18n.set(code);
+  }
+
+  // The compositor snippets. The four quick-capture actions and their default
+  // combinations are the backend's (GLOBAL_ACTIONS in commands/hotkeys.rs), and
+  // the CLI flags are the ones quick_mode_from_args parses — these two lists have
+  // to agree with it, which is what the accompanying test checks.
+  const QUICK_BINDS: { mods: string; key: string; flag: string }[] = [
+    { mods: "CTRL SHIFT", key: "N", flag: "--quick-task" },
+    { mods: "CTRL SHIFT", key: "M", flag: "--quick-note" },
+    { mods: "CTRL SHIFT", key: "B", flag: "--quick-clip" },
+    { mods: "CTRL SHIFT", key: "J", flag: "--quick-pinned" },
+  ];
+
+  const hyprConf = QUICK_BINDS
+    .map(b => `bind = ${b.mods}, ${b.key}, exec, kriptag ${b.flag}`)
+    .join("\n");
+
+  // Sway spells the modifiers differently and takes the whole combination as one
+  // token, so the same data cannot be printed with one template.
+  const swayConf = QUICK_BINDS
+    .map(b => `bindsym ${b.mods.split(" ").map(m => m === "CTRL" ? "Control" : "Shift").join("+")}+${b.key.toLowerCase()} exec kriptag ${b.flag}`)
+    .join("\n");
+
+  let copied = $state<string | null>(null);
+  async function copyConf(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = text;
+      setTimeout(() => { if (copied === text) copied = null; }, 2000);
+    } catch {
+      // Clipboard access can be refused; the text is on screen and selectable,
+      // so there is nothing to report — failing silently beats an error the user
+      // can do nothing about.
+    }
+  }
 
   let aiChoice = $state<"local" | "cloud" | "none">("none");
   let autostart = $state(false);
@@ -40,6 +88,7 @@
       } else {
         await disableAutostart().catch(() => {});
       }
+      settings.language = lang;
       settings.ai_provider =
         aiChoice === "cloud" ? "openai" : aiChoice === "none" ? "none" : "local";
       settings.onboarding_complete = true;
@@ -68,8 +117,26 @@
       <div class="alert">{error}</div>
     {/if}
 
-    {#if step === 1}
-      <h2>{t("Добро пожаловать в AI Notes")}</h2>
+    {#if step === 0}
+      <!-- Both names are written in their own language and never translated: at
+           this point the user may not read the interface language at all, so
+           "Русский"/"English" are the only labels that work either way. -->
+      <h2>Kriptag</h2>
+      <p class="muted">{t("Выберите язык интерфейса")}</p>
+      <div class="options" style="margin-top:12px;">
+        <label class="option">
+          <input type="radio" name="lang" value="ru" checked={lang === "ru"} onchange={() => chooseLang("ru")} />
+          <!-- i18n-ok-line: a language names itself and is never translated -->
+          <span><b>Русский</b></span>
+        </label>
+        <label class="option">
+          <input type="radio" name="lang" value="en" checked={lang === "en"} onchange={() => chooseLang("en")} />
+          <span><b>English</b></span>
+        </label>
+      </div>
+      <p class="muted" style="font-size:13px;margin-top:10px;">{t("Язык можно сменить позже в Настройках.")}</p>
+    {:else if step === 1}
+      <h2>{t("Добро пожаловать в Kriptag")}</h2>
       <p>{t("Задачи, заметки и мониторинг активности — всё локально, приватно и с опциональным ИИ.")}</p>
       <p class="muted">{t("Пара минут настройки — и можно работать.")}</p>
     {:else if step === 2}
@@ -109,18 +176,48 @@
       <h2>{t("Автозагрузка и хоткеи")}</h2>
       <label class="option" style="margin-bottom:12px;align-items:center;">
         <input type="checkbox" bind:checked={autostart} />
-        {t("Запускать AI Notes при входе в систему")}
+        {t("Запускать Kriptag при входе в систему")}
       </label>
-      <p>{t("Быстрая задача из любого места:")} <kbd>Ctrl Shift N</kbd></p>
-      <!-- The compositor tip, on Wayland only. It used to be shown to everyone,
-           including on Windows, where neither Hyprland/Sway nor a bind in a
-           compositor config means anything. -->
+      <p>{t("Быстрый ввод из любого места, не открывая окно:")}</p>
+      <ul class="keylist">
+        <li><kbd>Ctrl Shift N</kbd> {t("— задача")}</li>
+        <li><kbd>Ctrl Shift M</kbd> {t("— заметка")}</li>
+        <li><kbd>Ctrl Shift B</kbd> {t("— заметка из буфера обмена")}</li>
+        <li><kbd>Ctrl Shift J</kbd> {t("— быстрый слот")}</li>
+      </ul>
+      <!-- On Wayland the compositor owns these combinations, and saying so here
+           would only half-explain it — the next step is the config itself. -->
       {#if isWayland}
         <p class="muted" style="font-size:13px;">
-          {t("На Hyprland/Sway глобальные хоткеи перехватывает композитор — добавь бинд, запускающий")}
-          <code>ai-notes --quick-task</code>.
+          {t("На Wayland их регистрирует композитор — как это прописать, на следующем шаге.")}
+        </p>
+      {:else}
+        <p class="muted" style="font-size:13px;">
+          {t("Комбинации можно изменить в Настройках → Хоткеи.")}
         </p>
       {/if}
+    {:else if step === 7}
+      <h2>{t("Хоткеи в композиторе")}</h2>
+      <p>
+        {t("На Wayland глобальные хоткеи регистрирует композитор, а не приложение — поэтому их нужно прописать в его конфиге. Скопируйте строки под свой композитор:")}
+      </p>
+      <div class="conf-block">
+        <div class="conf-head">
+          <span class="muted">Hyprland — <code>~/.config/hypr/hyprland.conf</code></span>
+          <button class="btn-sm" onclick={() => copyConf(hyprConf)}>{copied === hyprConf ? t("Скопировано ✓") : t("Копировать")}</button>
+        </div>
+        <pre>{hyprConf}</pre>
+      </div>
+      <div class="conf-block">
+        <div class="conf-head">
+          <span class="muted">Sway — <code>~/.config/sway/config</code></span>
+          <button class="btn-sm" onclick={() => copyConf(swayConf)}>{copied === swayConf ? t("Скопировано ✓") : t("Копировать")}</button>
+        </div>
+        <pre>{swayConf}</pre>
+      </div>
+      <p class="muted" style="font-size:13px;">
+        {t("Команда — это имя бинарника; если Kriptag не установлен в систему, укажите полный путь до него. Комбинации можно изменить в Настройках → Хоткеи.")}
+      </p>
     {:else if step === 6}
       <h2>{t("Голосовой ввод")}</h2>
       <p>{t("Заметки и быстрый ввод можно надиктовывать. Речь распознаётся на этом компьютере — запись никуда не отправляется.")}</p>
@@ -131,9 +228,10 @@
     {:else}
       <h2>{t("Готово!")}</h2>
       <ul>
-        <li><b>{t("Задачи")}</b> {t("— создание через кнопку или")} <kbd>Ctrl Shift N</kbd></li>
-        <li><b>{t("Дашборд")}</b> {t("— активность и выполненные задачи по дням")}</li>
-        <li><b>{t("Трей")}</b> {t("— быстрое переключение режима (Focus — без уведомлений, Study — помодоро)")}</li>
+        <li><b>{t("Сегодня")}</b> {t("— экран «что сейчас»:")} <kbd>Ctrl `</kbd></li>
+        <li><b>{t("Задачи")}</b> {t("— список и доска, переключение")} <kbd>Ctrl Tab</kbd></li>
+        <li><b>{t("Заметки")}</b> {t("— Markdown, вики-ссылки [[…]] и граф связей")}</li>
+        <li><b>{t("Трей")}</b> {t("— режимы Focus (без уведомлений) и Study (помодоро)")}</li>
       </ul>
       <!-- The onboarding deliberately stays short: the full tour of the features
            lives in one place, Settings -> Help. Duplicating it here would mean
@@ -179,6 +277,41 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 16px;
+  }
+
+  .conf-block {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin: 10px 0;
+  }
+
+  .conf-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .conf-head span { flex: 1; min-width: 0; }
+
+  .conf-block pre {
+    margin: 0;
+    padding: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    /* The lines are long and must not wrap: a wrapped bind reads as two binds,
+       and copying it by hand would produce a broken config. */
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .keylist {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    line-height: 1.9;
   }
 
   .steps-track {

@@ -40,40 +40,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ai-notes"
-version = "0.6.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "cpal",
- "dirs 6.0.0",
- "hound",
- "keyring",
- "notify-rust",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sqlx",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
- "wayland-client",
- "wayland-protocols",
- "zip",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2651,6 +2617,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb1e621458ca9c51aa110bd0339d4751a056b9576bf1253aee1aa560dda0fc9d"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "kriptag"
+version = "0.6.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "cpal",
+ "dirs 6.0.0",
+ "hound",
+ "keyring",
+ "notify-rust",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "wayland-client",
+ "wayland-protocols",
+ "zip",
 ]
 
 [[package]]

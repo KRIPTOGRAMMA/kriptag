@@ -280,7 +280,7 @@ fn update_quiet_labels(app: &tauri::AppHandle, active_id: &str, remaining_mins: 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // `ai-notes --status` is a short-lived CLI for status bars (waybar): it prints
+    // `kriptag --status` is a short-lived CLI for status bars (waybar): it prints
     // JSON and exits without starting Tauri. Checked before anything else so it
     // does not disturb the single-instance of a running application.
     if std::env::args().any(|a| a == "--status") {
@@ -294,7 +294,7 @@ pub fn run() {
         .unwrap()
         .block_on(async {
             let app = tauri::Builder::default()
-                // Registered first: a second launch (say `ai-notes --quick-task`
+                // Registered first: a second launch (say `kriptag --quick-task`
                 // from a Hyprland bind) does not start a new instance but forwards
                 // its arguments here — we open quick capture or the main window.
                 .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -773,24 +773,24 @@ mod tests {
     #[test]
     fn quick_mode_parsing() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "--quick-task"])), Some("task"));
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "-q"])), Some("task"));
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "--quick-note"])), Some("note"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "--quick-task"])), Some("task"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "-q"])), Some("task"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "--quick-note"])), Some("note"));
         // a note wins, as it did in the old startup code
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "--quick-task", "--quick-note"])), Some("note"));
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes"])), None);
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "--quick-task", "--quick-note"])), Some("note"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag"])), None);
         // the clipboard is the most specific mode and outranks both
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "--quick-clip"])), Some("clipboard"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "--quick-clip"])), Some("clipboard"));
         assert_eq!(
-            quick_mode_from_args(&args(&["ai-notes", "--quick-note", "--quick-clip"])),
+            quick_mode_from_args(&args(&["kriptag", "--quick-note", "--quick-clip"])),
             Some("clipboard")
         );
         // Editing the pinned item is the only mode that creates nothing, so it
         // outranks everything: if the slot was explicitly requested, a stray second
         // flag must not replace that with creating a new record.
-        assert_eq!(quick_mode_from_args(&args(&["ai-notes", "--quick-pinned"])), Some("pinned"));
+        assert_eq!(quick_mode_from_args(&args(&["kriptag", "--quick-pinned"])), Some("pinned"));
         assert_eq!(
-            quick_mode_from_args(&args(&["ai-notes", "--quick-clip", "--quick-pinned"])),
+            quick_mode_from_args(&args(&["kriptag", "--quick-clip", "--quick-pinned"])),
             Some("pinned")
         );
     }

@@ -14,13 +14,18 @@ export interface KeybindAction {
 export const KEYBIND_ACTIONS: KeybindAction[] = [
   { id: "palette", label: "Командная палитра / поиск", defaultCombo: "Ctrl+KeyK" },
   { id: "daily_note", label: "Заметка дня", defaultCombo: "Ctrl+KeyD" },
+  // The digits follow the sidebar top to bottom, so the number is the position
+  // you see. They used to be handed out in the order the screens were written:
+  // the graph arrived last and took Ctrl+6 while sitting fourth in the list.
+  // "Сегодня" is deliberately outside the run — it is the "right now" screen
+  // rather than a section counted off, and it keeps Ctrl+`.
   { id: "view_tasks", label: "Перейти: Задачи", defaultCombo: "Ctrl+Digit1" },
   { id: "view_notes", label: "Перейти: Заметки", defaultCombo: "Ctrl+Digit2" },
-  { id: "view_dashboard", label: "Перейти: Дашборд", defaultCombo: "Ctrl+Digit3" },
-  { id: "view_calendar", label: "Перейти: Календарь", defaultCombo: "Ctrl+Digit4" },
-  { id: "view_settings", label: "Перейти: Настройки", defaultCombo: "Ctrl+Digit5" },
-  { id: "view_graph", label: "Перейти: Граф заметок", defaultCombo: "Ctrl+Digit6" },
-  { id: "view_today", label: "Перейти: Сегодня", defaultCombo: "Ctrl+Digit7" },
+  { id: "view_graph", label: "Перейти: Граф заметок", defaultCombo: "Ctrl+Digit3" },
+  { id: "view_dashboard", label: "Перейти: Дашборд", defaultCombo: "Ctrl+Digit4" },
+  { id: "view_calendar", label: "Перейти: Календарь", defaultCombo: "Ctrl+Digit5" },
+  { id: "view_settings", label: "Перейти: Настройки", defaultCombo: "Ctrl+Digit6" },
+  { id: "view_today", label: "Перейти: Сегодня", defaultCombo: "Ctrl+Backquote" },
 ];
 
 export type Keybinds = Record<string, string>;
@@ -74,6 +79,9 @@ export function formatCombo(combo: string): string {
     .map(part => {
       if (part.startsWith("Key")) return part.slice(3);
       if (part.startsWith("Digit")) return part.slice(5);
+      // Codes whose name is not the character they type. Without this the hint
+      // read "Ctrl+Backquote", naming the code instead of the key on the keyboard.
+      if (part === "Backquote") return "`";
       return part;
     })
     .join("+");

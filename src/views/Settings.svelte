@@ -12,6 +12,14 @@
   import { statusStore } from "../lib/stores/statuses.svelte";
   import type { AppSettings, AppCategoryRule, AppLimit, GlobalAction } from "../lib/types";
   import { applyTheme } from "../lib/theme";
+  import Switch from "../lib/components/Switch.svelte";
+  import Select from "../lib/components/Select.svelte";
+  import { colorSwatch, isDefaultColor, type ColorKey } from "../lib/colorDefaults";
+  import { isDarkColor } from "../lib/surfaces";
+  import {
+    parsePresets, serializePresets, presetFromColors, addPreset, removePreset,
+    PRESET_COLOR_KEYS, MAX_PRESETS, MAX_NAME_LEN, type ThemePreset,
+  } from "../lib/themePresets";
   import ModelDownloader from "../lib/components/ModelDownloader.svelte";
   import Icon from "../lib/components/Icon.svelte";
   import { HELP_TOPICS } from "../lib/help";
@@ -34,23 +42,139 @@
 
   // Each preset sets a pair of accents (primary plus secondary, the .btn-primary
   // gradient) with one button; "Custom" leaves the manual pickers below untouched.
-  const THEME_PRESETS: { name: string; accent: string; accentSecondary: string }[] = $derived([
-    { name: "Indigo", accent: "#6366f1", accentSecondary: "#6366f1" },
-    { name: t("Океан"), accent: "#0891b2", accentSecondary: "#6366f1" },
-    { name: t("Закат"), accent: "#f43f5e", accentSecondary: "#f59e0b" },
-    { name: t("Лес"), accent: "#10b981", accentSecondary: "#65a30d" },
-    { name: "Rose", accent: "#f43f5e", accentSecondary: "#f43f5e" },
-    { name: "Slate", accent: "#64748b", accentSecondary: "#64748b" },
+  // `bg` is optional: most presets only recolour the accents and leave whatever
+  // background is in effect, but one that carries its own ground has to set it,
+  // since every other surface is derived from that one value.
+  const THEME_PRESETS: { name: string; accent: string; accentSecondary: string; bg?: string }[] = $derived([
+    // Matches the app.css defaults, so this preset is the way back to the
+    // stock look after trying the others.
+    { name: "Indigo", accent: "#6366f1", accentSecondary: "#a855f7" },
+    // The rest carry their own ground. Grounds and accents are taken from the
+    // established editor palettes, but every pair was re-measured against the
+    // surfaces this app derives from them: the accent clears 4.5 both on the
+    // background and on a card, which is what the originals do not guarantee —
+    // they were tuned for syntax on one flat colour, not for UI on a stack.
+    { name: "Ember", accent: "#ff6b35", accentSecondary: "#ff9f1c", bg: "#0d1117" },
+    { name: "Nord", accent: "#88c0d0", accentSecondary: "#b48ead", bg: "#2e3440" },
+    { name: "Dracula", accent: "#c9a9fb", accentSecondary: "#ff79c6", bg: "#282a36" },
+    { name: "Tokyo", accent: "#7aa2f7", accentSecondary: "#bb9af7", bg: "#1a1b26" },
+    { name: "Gruvbox", accent: "#fabd2f", accentSecondary: "#fe8019", bg: "#282828" },
+    { name: "Everforest", accent: "#a7c080", accentSecondary: "#dbbc7f", bg: "#2d353b" },
+    // The light half. Their accents are deliberately darker than the originals:
+    // Solarized's own #268bd2 gives 3.56 on a card, below legibility, because a
+    // card here sits lighter than the ground it came from.
+    { name: "Solarized", accent: "#1a6ea8", accentSecondary: "#1a7f74", bg: "#fdf6e3" },
+    { name: t("Роза"), accent: "#6f5b87", accentSecondary: "#a8524f", bg: "#faf4ed" },
+    { name: t("Песок"), accent: "#8a5a2b", accentSecondary: "#a0522d", bg: "#f5f0e8" },
+    // The user's own trials. Slate's ground is darker than the #4A5568 that was
+    // sent: a mid-luminance ground sank both accents (2.52 and 1.49), because
+    // there is no room to derive a stack from it in either direction. Its accent
+    // was lifted for the same reason — #E8744F read 3.76 on a card.
+    { name: t("Латунь"), accent: "#c8a96e", accentSecondary: "#e0c892", bg: "#111111" },
+    { name: t("Полярный"), accent: "#e4f0f6", accentSecondary: "#8fb8d8", bg: "#0a0f1e" },
+    { name: t("Неон"), accent: "#ff3d8b", accentSecondary: "#ff6b9d", bg: "#080808" },
+    { name: t("Пергамент"), accent: "#f0e6c8", accentSecondary: "#c8b88a", bg: "#1c1c1e" },
+    { name: t("Серебро"), accent: "#c0c0c0", accentSecondary: "#c41e3a", bg: "#0a0a0a" },
+    { name: t("Сланец"), accent: "#f59b76", accentSecondary: "#3fa9a6", bg: "#232833" },
+    { name: t("Орхидея"), accent: "#e8b4d8", accentSecondary: "#b48ead", bg: "#12111a" },
   ]);
+
+  // Split by how much damage a wrong value does. The accent and the backgrounds
+  // are what people come here to change; text and borders are one bad pick away
+  // from an unreadable screen, so they live behind a disclosure.
+  const MAIN_COLORS: [ColorKey, string][] = $derived([
+    ["color_accent", t("Акцент")],
+    ["color_accent_secondary", t("Доп. акцент")],
+    ["color_bg", t("Фон")],
+  ]);
+
+  // Everything here is derived from the background by default (see surfaces.ts);
+  // these fields override one step of that stack. "Second plane" rather than
+  // "Sidebar background": the token paints the sidebar plus two dozen other
+  // second-plane surfaces — the calendar backlog, the graph, dashboard panels —
+  // and the old label promised something narrower than it delivered.
+  // Grouped by layer rather than listed flat: seven pickers in one grid read as
+  // a wall, and the grouping is also the explanation of what derives from what.
+  const ADVANCED_GROUPS: { title: string; colors: [ColorKey, string][] }[] = $derived([
+    {
+      title: t("Поверхности"),
+      colors: [
+        ["color_bg_secondary", t("Второй план")],
+        ["color_bg_card", t("Карточки")],
+        ["color_bg_hover", t("Фон наведения")],
+        ["color_border", t("Границы")],
+      ],
+    },
+    {
+      title: t("Текст"),
+      colors: [
+        ["color_text", t("Основной")],
+        ["color_text_secondary", t("Подписи")],
+      ],
+    },
+  ]);
+
+  // Which theme is on screen right now — the swatch of an unset colour has to
+  // show that theme's default, not the light one. `theme_mode` alone is not
+  // enough: under "system" the answer comes from the OS.
+  let isDark = $state(false);
+  function syncIsDark() {
+    if (typeof document !== "undefined") {
+      isDark = document.documentElement.classList.contains("dark");
+    }
+  }
 
   // The theme is applied on every change — a live preview without pressing "Save".
   function previewTheme() {
     applyTheme(settings.theme_mode, settings);
+    // applyTheme is what toggles the `dark` class, so the swatches of unset
+    // colours only follow a theme switch if they are re-read afterwards.
+    syncIsDark();
   }
 
-  function applyPreset(accent: string, accentSecondary: string) {
+  // Switching light/dark/system means "give me this mode's own palette". The
+  // derived surfaces are written inline on <html>, and inline beats any class —
+  // so a background left over from a dark preset would survive the switch and
+  // the light theme would appear broken, with no way out from the UI. The accents
+  // stay: those are a choice about the app, not about the mode.
+  function switchThemeMode() {
+    resetBackground();
+  }
+
+  // Drops the chosen ground and every override derived from it, leaving the
+  // accents alone. Used both by the mode switch and by the button next to the
+  // background picker.
+  function resetBackground() {
+    settings.color_bg = "";
+    settings.color_bg_secondary = "";
+    settings.color_bg_hover = "";
+    settings.color_bg_card = "";
+    settings.color_text_secondary = "";
+    settings.color_text = "";
+    settings.color_border = "";
+    previewTheme();
+  }
+
+  function applyPreset(accent: string, accentSecondary: string, bg?: string) {
     settings.color_accent = accent;
     settings.color_accent_secondary = accentSecondary;
+    // A preset without its own ground leaves the current one alone; one that has
+    // it also clears the manual overrides of the derived surfaces, or a leftover
+    // "second plane" from an earlier choice would sit on top of the new ground.
+    if (bg) {
+      settings.color_bg = bg;
+      settings.color_bg_secondary = "";
+      settings.color_bg_hover = "";
+      settings.color_bg_card = "";
+      settings.color_text_secondary = "";
+      settings.color_text = "";
+      settings.color_border = "";
+      // The mode follows the ground. The derived surfaces cover only what is
+      // computed from the background; the `dark` class still governs everything
+      // else — category colours, the tag chip, --danger. Leaving a light preset
+      // under `.dark` would paint those for the wrong ground.
+      settings.theme_mode = isDarkColor(bg) ? "dark" : "light";
+    }
     previewTheme();
   }
 
@@ -60,9 +184,93 @@
     settings.color_bg = "";
     settings.color_bg_secondary = "";
     settings.color_bg_hover = "";
+    settings.color_bg_card = "";
+    settings.color_text_secondary = "";
     settings.color_text = "";
     settings.color_border = "";
     previewTheme();
+  }
+
+  // --- Saved colour sets ---
+  //
+  // Unlike the built-in presets, which carry a pair of accents, a saved set
+  // restores all seven colours: it is a whole look, and reapplying the accents
+  // over someone else's background would be worse than doing nothing.
+  let customPresets: ThemePreset[] = $state([]);
+  let presetName = $state("");
+
+  function saveCurrentAsPreset() {
+    const name = presetName.trim();
+    if (!name) return;
+    customPresets = addPreset(customPresets, presetFromColors(name, settings as any));
+    settings.custom_theme_presets = serializePresets(customPresets);
+    presetName = "";
+  }
+
+  // --- Preview on hover ---
+  //
+  // A swatch shows two accents; it says nothing about what the ground does to
+  // cards, borders and captions — which is most of what a preset changes. So
+  // hovering applies the theme for real and leaving puts back what was chosen.
+  //
+  // Nothing is written to `settings`: the preview only touches the CSS variables
+  // on <html>, so leaving the row — or the screen — restores the saved state,
+  // and a preset seen but not clicked never reaches the DB.
+  function previewColors(colors: Partial<AppSettings>) {
+    const mode = colors.color_bg
+      ? (isDarkColor(colors.color_bg) ? "dark" : "light")
+      : settings.theme_mode;
+    applyTheme(mode as typeof settings.theme_mode, { ...settings, ...colors });
+  }
+
+  function endPreview() {
+    previewTheme();
+  }
+
+  function previewPreset(p: { accent: string; accentSecondary: string; bg?: string }) {
+    // The same clearing applyPreset does: without it a manual "second plane"
+    // would sit on top of the previewed ground and the preview would lie.
+    previewColors({
+      color_accent: p.accent,
+      color_accent_secondary: p.accentSecondary,
+      ...(p.bg
+        ? {
+            color_bg: p.bg,
+            color_bg_secondary: "",
+            color_bg_hover: "",
+            color_bg_card: "",
+            color_text_secondary: "",
+            color_text: "",
+            color_border: "",
+          }
+        : {}),
+    });
+  }
+
+  function previewCustomPreset(preset: ThemePreset) {
+    const colors: Partial<AppSettings> = {};
+    for (const key of PRESET_COLOR_KEYS) (colors as any)[key] = preset.colors[key] ?? "";
+    previewColors(colors);
+  }
+
+  function applyCustomPreset(preset: ThemePreset) {
+    for (const key of PRESET_COLOR_KEYS) {
+      (settings as any)[key] = preset.colors[key] ?? "";
+    }
+    previewTheme();
+  }
+
+  function deleteCustomPreset(name: string) {
+    customPresets = removePreset(customPresets, name);
+    settings.custom_theme_presets = serializePresets(customPresets);
+  }
+
+  // A saved set is shown as the same two-stop gradient the built-in presets use,
+  // falling back to the theme default when a colour follows it.
+  function presetSwatch(preset: ThemePreset): string {
+    const a = colorSwatch("color_accent", preset.colors.color_accent ?? "", isDark);
+    const b = colorSwatch("color_accent_secondary", preset.colors.color_accent_secondary ?? "", isDark);
+    return `linear-gradient(135deg, ${a}, ${b})`;
   }
 
   let settings: AppSettings = $state({
@@ -87,6 +295,8 @@
     color_bg: "",
     color_bg_secondary: "",
     color_bg_hover: "",
+    color_bg_card: "",
+    color_text_secondary: "",
     color_text: "",
     color_border: "",
     quiet_until: "",
@@ -94,6 +304,7 @@
     ai_fallback: false,
     openai_in_keyring: false,
     anthropic_in_keyring: false,
+    custom_theme_presets: "",
     app_category_rules: "",
     app_limits: "",
     auto_backup_dir: "",
@@ -110,8 +321,120 @@
     history_cleanup_months: 0,
   });
 
+  // --- The preset dropdown ---
+  //
+  // Seventeen presets no longer fit a row of buttons. A listbox rather than a
+  // native <select>, because the gradient swatch is half of what a preset says
+  // and <option> cannot carry one.
+  let presetOpen = $state(false);
+  let presetOptionEls: HTMLButtonElement[] = $state([]);
+  // The saved sets get their own dropdown with the same behaviour; the handlers
+  // below take the list they act on rather than being written twice.
+  let customOpen = $state(false);
+  let customOptionEls: HTMLButtonElement[] = $state([]);
+
+  // Which preset the current colours correspond to. Compared by value rather
+  // than remembered on click: the accents can also be changed by hand, by a
+  // saved set, or by a reset, and a remembered name would keep claiming a preset
+  // that is no longer in effect.
+  const currentPreset = $derived(
+    THEME_PRESETS.find(
+      (p) =>
+        p.accent === settings.color_accent &&
+        p.accentSecondary === settings.color_accent_secondary &&
+        (p.bg ?? "") === settings.color_bg,
+    ) ?? null,
+  );
+
+  const currentPresetName = $derived(currentPreset?.name ?? t("Свои цвета"));
+
+  const currentPresetSwatch = $derived(
+    currentPreset
+      ? `linear-gradient(135deg, ${currentPreset.accent}, ${currentPreset.accentSecondary})`
+      : `linear-gradient(135deg, ${colorSwatch("color_accent", settings.color_accent, isDark)}, ${colorSwatch("color_accent_secondary", settings.color_accent_secondary, isDark)})`,
+  );
+
+  function choosePreset(p: { accent: string; accentSecondary: string; bg?: string }) {
+    applyPreset(p.accent, p.accentSecondary, p.bg);
+    presetOpen = false;
+  }
+
+  // Focus moving outside the whole control closes it; moving between the trigger
+  // and the options does not. relatedTarget is null when focus leaves the window
+  // entirely — the list stays open then, so switching to another window and back
+  // does not lose the choice being made.
+  function dropdownBlur(e: FocusEvent, close: () => void) {
+    const next = e.relatedTarget as Node | null;
+    if (next && !(e.currentTarget as HTMLElement).contains(next)) {
+      close();
+      // Tabbing out of the list is the third way to leave it, after the pointer
+      // and Escape; all three have to drop the preview.
+      endPreview();
+    }
+  }
+
+  function dropdownTriggerKey(e: KeyboardEvent, open: () => void, els: HTMLButtonElement[]) {
+    if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      open();
+      queueMicrotask(() => els[0]?.focus());
+    }
+  }
+
+  function dropdownListKey(e: KeyboardEvent, close: () => void, els: HTMLButtonElement[]) {
+    if (e.key === "Escape") {
+      close();
+      // Leaving on Escape must also drop whatever the pointer was previewing.
+      endPreview();
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const items = els.filter(Boolean);
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    // Wraps at both ends: a list this long is worse to walk off than to cycle.
+    items[(at + step + items.length) % items.length]?.focus();
+  }
+
+  function chooseCustomPreset(p: ThemePreset) {
+    applyCustomPreset(p);
+    customOpen = false;
+  }
+
+  // Closing by clicking the trigger again leaves the pointer nowhere near the
+  // list, so onmouseleave never fires — the preview would stay applied.
+  function toggleDropdown(open: boolean, set: (v: boolean) => void) {
+    set(!open);
+    if (open) endPreview();
+  }
+
   let saving = $state(false);
   let saved = $state(false);
+  // Autosave (no "Save" button). The form is loaded once and then written back on
+  // every change; `loaded` keeps the initial load — and the reload after an
+  // import — from being written straight back as if the user had typed it.
+  let loaded = $state(false);
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  // The global hotkeys as last handed to the OS, so a save that did not touch
+  // them does not re-register anything.
+  let lastRegisteredGlobals = $state("");
+
+  // The same 800ms the note editor uses. Long enough that typing a word is one
+  // write, short enough that leaving the screen right after a change still saves.
+  function scheduleSave() {
+    if (!loaded) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; void save(); }, 800);
+  }
+
+  // For a discrete choice — a preset, a checkbox, a dropdown — waiting adds
+  // nothing: there is no next keystroke to coalesce with.
+  function saveNow() {
+    if (!loaded) return;
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    void save();
+  }
   let error: string | null = $state(null);
   let trackingMode: "extended" | "basic" | null = $state(null);
   let windowTracking: string | null = $state(null);
@@ -258,6 +581,7 @@
   onDestroy(() => ruleUnlisten?.());
 
   onMount(async () => {
+    syncIsDark();
     ruleUnlisten = await listen<{ rules: AppCategoryRule[] | null; error: string | null }>(
       "ai-app-rules",
       (e) => {
@@ -283,11 +607,14 @@
       // locale), otherwise the field would look empty while the translation works.
       if (!settings.language) settings.language = i18n.lang;
       appRules = parseRules(settings.app_category_rules);
+      customPresets = parsePresets(settings.custom_theme_presets);
       appLimits = Object.fromEntries(
         parseLimits(settings.app_limits).map(l => [l.category, l.daily_mins])
       );
       keybinds = parseKeybinds(settings.keybinds);
       globalBinds = parseKeybinds(settings.global_keybinds);
+      // What the OS already has registered from the previous run.
+      lastRegisteredGlobals = settings.global_keybinds;
     } catch (e) {
       error = String(e);
     }
@@ -302,6 +629,31 @@
     whisperPath = await api.modelPath("whisper").catch(() => null);
     categoryStore.load();
     statusStore.load();
+    // Only now: everything above assigns to `settings`, and autosave must not
+    // write the freshly loaded values straight back.
+    loaded = true;
+  });
+
+  // The autosave trigger. Reading the fields explicitly rather than relying on a
+  // deep read of `settings`: a $derived over the whole object would also fire on
+  // the backend-owned fields the backup loop writes (last_auto_backup), turning
+  // every backup into a settings save.
+  $effect(() => {
+    JSON.stringify(settings);
+    appRules;
+    appLimits;
+    keybinds;
+    globalBinds;
+    if (loaded) scheduleSave();
+  });
+
+  onDestroy(() => {
+    // A change made in the last 800ms would otherwise be lost on leaving the
+    // screen — the very case an explicit button used to cover.
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      void save();
+    }
   });
 
   // --- Hotkeys: the overrides live in settings.keybinds (JSON) and the defaults in
@@ -466,8 +818,13 @@
       settings.global_keybinds = JSON.stringify(globalBinds);
       await api.saveSettings(settings);
       // Re-registration with the OS: without it a new combination would only start
-      // working after a restart while the old one kept firing.
-      globalFailed = await api.applyGlobalHotkeys().catch(() => []);
+      // working after a restart while the old one kept firing. Under autosave it
+      // is conditional — every keystroke in an unrelated field used to drag the
+      // OS-level hotkey registry along with it.
+      if (settings.global_keybinds !== lastRegisteredGlobals) {
+        globalFailed = await api.applyGlobalHotkeys().catch(() => []);
+        lastRegisteredGlobals = settings.global_keybinds;
+      }
       applyTheme(settings.theme_mode, settings);
       // App.svelte keeps its own copy of the hotkeys for the keydown handler —
       // without this event a rebinding would only take effect after a reload.
@@ -542,7 +899,7 @@
     error = null;
     try {
       const path = await saveDialog({
-        defaultPath: "ai-notes-backup.zip",
+        defaultPath: "kriptag-backup.zip",
         filters: [{ name: "ZIP", extensions: ["zip"] }],
       });
       if (!path) return;
@@ -611,7 +968,7 @@
       question += "\n\n" + t("Импорт заменит все текущие данные, приложение закроется. Продолжить?");
 
       // GTK always draws a heading above the text, with or without `title` — an
-      // omitted one just becomes the app name, so it showed "ai-notes" twice.
+      // omitted one just becomes the app name, so it showed "kriptag" twice.
       // Giving it a real title is the only way to make that line useful.
       // Button labels are explicit too: the plugin defaults to English
       // "Ok"/"Cancel" regardless of the interface language.
@@ -671,11 +1028,11 @@
     oninput={recomputeSearch}
   />
 
-  <!-- seg + seg--tabs provide the look; .settings-tabs remains for its own
+  <!-- seg + seg--underline provide the look; .settings-tabs remains for its own
        spacing and its wrap onto a second line. The .settings-tab name is left
        alone: about 25 e2e tests select by it, and this change is purely
        cosmetic. -->
-  <div class="settings-tabs seg seg--tabs" role="tablist">
+  <div class="settings-tabs seg seg--underline" role="tablist">
     {#each TABS as tab (tab.id)}
       <button
         type="button"
@@ -700,48 +1057,221 @@
          before saving is the only way to tell you picked the right one. -->
     <label class="field">
       {t("Язык")}
-      <select bind:value={settings.language} onchange={() => i18n.set(settings.language as Lang)}>
-        {#each LANGS as l (l.id)}
-          <option value={l.id}>{l.label}</option>
-        {/each}
-      </select>
+      <Select
+        value={settings.language}
+        ariaLabel={t("Язык")}
+        onChange={(v) => { settings!.language = v; i18n.set(v as Lang); }}
+        options={LANGS.map(l => ({ value: l.id, label: l.label }))}
+      />
     </label>
 
-    <div class="radio-row">
-      {#each [["light", t("Светлая")], ["dark", t("Тёмная")], ["system", t("Системная")]] as [val, label]}
-        <label class="check">
-          <input type="radio" name="theme_mode" value={val} bind:group={settings.theme_mode} onchange={previewTheme} />
-          {label}
-        </label>
+    <!-- The caption is what tells the toggle apart from the language field above
+         it. Spacing alone was not enough: everything else in this panel is
+         labelled ("Язык" above, "Пресеты акцента" below), so an unlabelled row of
+         buttons read as a continuation of the field before it.
+
+         .sub-label, the same element the accent presets use — a caption for a
+         control that is not a <label>-wrapped input. -->
+    <div class="sub-label theme-label">{t("Тема")}</div>
+    <!-- .seg rather than radio buttons: this is a three-way toggle, which is
+         exactly what the segmented control is for, and native radios are drawn by
+         the GTK theme in WebKitGTK — round, in system colours, past the tokens.
+         The same reason the selects and the subtask ticks had to be replaced. -->
+    <div class="seg theme-seg" role="radiogroup" aria-label={t("Тема")}>
+      {#each [["light", t("Светлая")], ["dark", t("Тёмная")], ["system", t("Системная")]] as [val, label] (val)}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={settings.theme_mode === val}
+          class:active={settings.theme_mode === val}
+          onclick={() => { settings!.theme_mode = val as AppSettings["theme_mode"]; switchThemeMode(); }}
+        >{label}</button>
       {/each}
     </div>
 
     <div class="sub-label">{t("Пресеты акцента")}</div>
-    <div class="preset-row">
-      {#each THEME_PRESETS as p}
-        <button type="button" class="btn-sm" onclick={() => applyPreset(p.accent, p.accentSecondary)}>
-          <span class="swatch" style="background:linear-gradient(135deg, {p.accent}, {p.accentSecondary});"></span>
-          {p.name}
+    <!-- A listbox rather than a native <select>: the gradient swatch is half of
+         what a preset says, and <option> cannot carry one. Closing on focusout
+         covers both a click elsewhere and tabbing away, with no global listener
+         to leak. -->
+    <div class="preset-select" role="none" onfocusout={(e) => dropdownBlur(e, () => presetOpen = false)}
+         onkeydown={(e) => { if (e.key === "Escape" && presetOpen) { presetOpen = false; endPreview(); } }}>
+      <button
+        type="button"
+        class="preset-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={presetOpen}
+        onclick={() => toggleDropdown(presetOpen, (v) => presetOpen = v)}
+        onkeydown={(e) => dropdownTriggerKey(e, () => presetOpen = true, presetOptionEls)}
+      >
+        <span class="swatch" style="background:{currentPresetSwatch};"></span>
+        <span class="preset-trigger-name">{currentPresetName}</span>
+        <span class="preset-caret" aria-hidden="true">▾</span>
+      </button>
+
+      {#if presetOpen}
+        <!-- Hover and keyboard focus both preview: the list is walkable by
+             arrows, and a preview only the mouse can reach would be a different
+             control depending on how you got there. -->
+        <ul class="preset-list" role="listbox" tabindex="-1"
+            onkeydown={(e) => dropdownListKey(e, () => presetOpen = false, presetOptionEls)}
+            onmouseleave={endPreview}>
+          {#each THEME_PRESETS as p, i}
+            <li>
+              <button
+                type="button"
+                role="option"
+                aria-selected={p.name === currentPresetName}
+                class="preset-option"
+                class:selected={p.name === currentPresetName}
+                bind:this={presetOptionEls[i]}
+                onmouseenter={() => previewPreset(p)}
+                onfocus={() => previewPreset(p)}
+                onclick={() => choosePreset(p)}
+              >
+                <span class="swatch" style="background:linear-gradient(135deg, {p.accent}, {p.accentSecondary});"></span>
+                {p.name}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+
+    <!-- Saved sets. Shown below the built-in ones and only once something has
+         been saved: an empty list with a permanent name field would read as an
+         unfinished form. -->
+    {#if customPresets.length > 0}
+      <div class="sub-label" style="margin-top:12px;">{t("Мои пресеты")}</div>
+      <div class="preset-select" role="none" onfocusout={(e) => dropdownBlur(e, () => customOpen = false)}
+           onkeydown={(e) => { if (e.key === "Escape" && customOpen) { customOpen = false; endPreview(); } }}>
+        <button
+          type="button"
+          class="preset-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={customOpen}
+          onclick={() => toggleDropdown(customOpen, (v) => customOpen = v)}
+          onkeydown={(e) => dropdownTriggerKey(e, () => customOpen = true, customOptionEls)}
+        >
+          <span class="swatch" style="background:{customPresets.length ? presetSwatch(customPresets[0]) : 'transparent'};"></span>
+          <span class="preset-trigger-name">{t("Выбрать набор")}</span>
+          <span class="preset-caret" aria-hidden="true">▾</span>
         </button>
-      {/each}
+
+        {#if customOpen}
+          <ul class="preset-list" role="listbox" tabindex="-1"
+              onkeydown={(e) => dropdownListKey(e, () => customOpen = false, customOptionEls)}
+              onmouseleave={endPreview}>
+            {#each customPresets as p, i (p.name)}
+              <li class="custom-option">
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected="false"
+                  class="preset-option"
+                  bind:this={customOptionEls[i]}
+                  onmouseenter={() => previewCustomPreset(p)}
+                  onfocus={() => previewCustomPreset(p)}
+                  onclick={() => chooseCustomPreset(p)}
+                >
+                  <span class="swatch" style="background:{presetSwatch(p)};"></span>
+                  {p.name}
+                </button>
+                <!-- Deletion lives in the row rather than behind a second click:
+                     a saved set is the user's own, and pruning the list is as
+                     ordinary here as picking from it. -->
+                <button
+                  type="button"
+                  class="option-del"
+                  title={t("Удалить пресет")}
+                  aria-label={t("Удалить пресет")}
+                  onclick={() => deleteCustomPreset(p.name)}
+                >✕</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+
+    <div class="preset-row" style="margin-top:8px;">
+      <input
+        type="text"
+        class="preset-name"
+        maxlength={MAX_NAME_LEN}
+        placeholder={t("Название набора")}
+        bind:value={presetName}
+        onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveCurrentAsPreset(); } }}
+      />
+      <button
+        type="button"
+        class="btn-sm"
+        disabled={!presetName.trim() || (customPresets.length >= MAX_PRESETS && !customPresets.some(p => p.name === presetName.trim()))}
+        onclick={saveCurrentAsPreset}
+      >{t("Сохранить текущие цвета")}</button>
     </div>
 
     <div class="color-grid">
-      {#each [["color_accent",t("Акцент")],["color_accent_secondary",t("Доп. акцент")],["color_bg",t("Фон")],["color_bg_secondary",t("Фон сайдбара")],["color_bg_hover",t("Фон наведения")],["color_text",t("Текст")],["color_border",t("Границы")]] as [key, label]}
+      {#each MAIN_COLORS as [key, label]}
         <label class="check">
           <input type="color"
-            value={(settings as any)[key] || "#6366f1"}
+            value={colorSwatch(key, (settings as any)[key] ?? "", isDark, settings.color_bg)}
             oninput={(e) => { (settings as any)[key] = e.currentTarget.value; previewTheme(); }}
-            class="color-input" />
+            class="color-input"
+            class:is-default={isDefaultColor((settings as any)[key] ?? "")} />
           {label}
         </label>
       {/each}
     </div>
 
-    <button type="button" class="btn-sm" style="margin-top:10px;" onclick={resetColors}>{t("Сбросить к дефолту")}</button>
+    <p class="hint">{t("Сайдбар, карточки, границы и текст выводятся из фона — они всегда согласованы между собой.")}</p>
+
+    <!-- The way back from a chosen ground. Without it the only exit is the reset
+         inside the disclosure, and someone whose light theme looks wrong after a
+         dark preset has no reason to look there. -->
+    {#if !isDefaultColor(settings.color_bg)}
+      <button type="button" class="btn-sm" style="margin-top:8px;" onclick={resetBackground}>
+        {t("Вернуть фон темы")}
+      </button>
+    {/if}
+
+    <!-- The disclosure holds the overrides of the derived stack. Text and
+         borders in particular: breaking either one costs readability outright,
+         and unlike the accent or the background they are rarely what someone
+         came here to change. -->
+    <details class="advanced-colors">
+      <summary>{t("Продвинутые настройки цвета")}</summary>
+      <p class="hint" style="margin-top:8px;">{t("Пунктир — значение выводится из фона. Заданный цвет заменяет выведенное только для этого элемента.")}</p>
+
+      {#each ADVANCED_GROUPS as group}
+        <div class="sub-label" style="margin-top:12px;">{group.title}</div>
+        <div class="color-grid">
+          {#each group.colors as [key, label]}
+            <label class="check">
+              <input type="color"
+                value={colorSwatch(key, (settings as any)[key] ?? "", isDark, settings.color_bg)}
+                oninput={(e) => { (settings as any)[key] = e.currentTarget.value; previewTheme(); }}
+                class="color-input"
+                class:is-default={isDefaultColor((settings as any)[key] ?? "")} />
+              {label}
+              <!-- Per-field reset: without it the only way back from one bad pick
+                   is to clear every colour at once. -->
+              {#if !isDefaultColor((settings as any)[key] ?? "")}
+                <button type="button" class="unset-btn"
+                  title={t("Вернуть выведенное значение")}
+                  aria-label={t("Вернуть выведенное значение")}
+                  onclick={() => { (settings as any)[key] = ""; previewTheme(); }}>✕</button>
+              {/if}
+            </label>
+          {/each}
+        </div>
+      {/each}
+
+      <button type="button" class="btn-sm" style="margin-top:12px;" onclick={resetColors}>{t("Сбросить к дефолту")}</button>
+    </details>
 
     <label class="check" style="margin-top:12px;">
-      <input type="checkbox" bind:checked={settings.show_subtasks_expanded} />{t("Показывать подзадачи в списке задач развёрнутыми")}</label>
+      <Switch bind:checked={settings.show_subtasks_expanded} />{t("Показывать подзадачи в списке задач развёрнутыми")}</label>
   </section>
 
   <section class="card panel" class:hidden-by-search={sectionMatches[1] === false} class:hidden-by-tab={SECTION_TAB[1] !== activeTab} bind:this={sectionEls[1]}>
@@ -749,16 +1279,17 @@
 
     <label class="field">
       <span class="label">{t("Провайдер")}</span>
-      <select bind:value={settings.ai_provider}>
-        {#each PROVIDERS as p (p.value)}
-          <option value={p.value}>{p.label}</option>
-        {/each}
-      </select>
+      <Select
+        value={settings.ai_provider}
+        ariaLabel={t("Провайдер")}
+        onChange={(v) => (settings!.ai_provider = v as AppSettings["ai_provider"])}
+        options={PROVIDERS.map(p => ({ value: p.value, label: p.label }))}
+      />
     </label>
 
     {#if settings.ai_provider !== "none"}
       <label class="check" style="margin-top:10px;">
-        <input type="checkbox" bind:checked={settings.ai_fallback} />{t("Автопереключение: при ошибке или недоступности пробовать других доступных провайдеров")}</label>
+        <Switch bind:checked={settings.ai_fallback} />{t("Автопереключение: при ошибке или недоступности пробовать других доступных провайдеров")}</label>
     {/if}
 
     <!-- One settings block whose fields depend on the chosen provider, not two
@@ -785,16 +1316,26 @@
         <label class="field">
           <span class="label">{t("Модель")}</span>
           {#if isOpenai}
-            <select bind:value={settings.openai_model}>
-              <option value="gpt-4o-mini">{t("gpt-4o-mini (быстрый, дешёвый)")}</option>
-              <option value="gpt-4o">gpt-4o</option>
-              <option value="gpt-4-turbo">gpt-4-turbo</option>
-            </select>
+            <Select
+              value={settings.openai_model}
+              ariaLabel={t("Модель")}
+              onChange={(v) => (settings!.openai_model = v)}
+              options={[
+                { value: "gpt-4o-mini", label: t("gpt-4o-mini (быстрый, дешёвый)") },
+                { value: "gpt-4o", label: "gpt-4o" },
+                { value: "gpt-4-turbo", label: "gpt-4-turbo" },
+              ]}
+            />
           {:else}
-            <select bind:value={settings.anthropic_model}>
-              <option value="claude-haiku-4-5-20251001">{t("claude-haiku-4-5 (быстрый, дешёвый)")}</option>
-              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-            </select>
+            <Select
+              value={settings.anthropic_model}
+              ariaLabel={t("Модель")}
+              onChange={(v) => (settings!.anthropic_model = v)}
+              options={[
+                { value: "claude-haiku-4-5-20251001", label: t("claude-haiku-4-5 (быстрый, дешёвый)") },
+                { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
+              ]}
+            />
           {/if}
         </label>
       </div>
@@ -809,11 +1350,16 @@
 
   <section class="card panel" class:hidden-by-search={sectionMatches[2] === false} class:hidden-by-tab={SECTION_TAB[2] !== activeTab} bind:this={sectionEls[2]}>
     <h3 class="section-title">{t("Режим работы")}</h3>
-    <select bind:value={settings.work_mode} style="width:100%;">
-      <option value="Light">{t("Light — обычный режим")}</option>
-      <option value="Focus">{t("Focus — без уведомлений")}</option>
-      <option value="Study">{t("Study — помодоро-сессии (25/5)")}</option>
-    </select>
+    <Select
+      value={settings.work_mode}
+      ariaLabel={t("Режим работы")}
+      onChange={(v) => (settings!.work_mode = v as AppSettings["work_mode"])}
+      options={[
+        { value: "Light", label: t("Light — обычный режим") },
+        { value: "Focus", label: t("Focus — без уведомлений") },
+        { value: "Study", label: t("Study — помодоро-сессии (25/5)") },
+      ]}
+    />
     <p class="hint">{t("Применяется сразу после сохранения.")}</p>
 
     {#if settings.work_mode === "Study"}
@@ -860,7 +1406,7 @@
          statistics". -->
     {#if windowTracking}
       <label class="option" style="margin-top:12px;align-items:flex-start;">
-        <input type="checkbox" bind:checked={settings.track_domains} />
+        <Switch bind:checked={settings.track_domains} />
         <span>{t("Разбивать браузерное время по сайтам")}
           <br /><small class="hint" style="margin:0;">
             {t("Требует чтения заголовков окон браузера. В базу сохраняется")}
@@ -877,11 +1423,14 @@
       {#each appRules as rule, i}
         <div class="rule-row">
           <input bind:value={rule.pattern} placeholder={t("класс окна, напр. jetbrains-*")} />
-          <select bind:value={rule.category}>
-            {#each RULE_CATEGORIES as c}
-              <option value={c.value}>{c.label}</option>
-            {/each}
-          </select>
+          <span class="rule-cat">
+            <Select
+              value={rule.category}
+              ariaLabel={t("Категория")}
+              onChange={(v) => (rule.category = v)}
+              options={RULE_CATEGORIES.map(c => ({ value: c.value, label: c.label }))}
+            />
+          </span>
           <button class="btn-icon btn-danger" title={t("Удалить правило")}
             onclick={() => appRules = appRules.filter((_, j) => j !== i)}>✕</button>
         </div>
@@ -905,6 +1454,9 @@
         {#if ruleSuggestions.length > 0}
           <div class="rule-suggestions">
             {#each ruleSuggestions as sug (sug.pattern)}
+              <!-- Stays a checkbox rather than becoming a Switch: this ticks a row
+                   in a list ("Добавить отмеченные"), which is a selection, not an
+                   on/off setting. -->
               <label class="rule-row suggestion-row">
                 <input type="checkbox" bind:checked={sug.take} />
                 <code style="flex:1;">{sug.pattern}</code>
@@ -1008,9 +1560,9 @@
       </label>
     </div>
     <label class="check" style="margin-top:10px;">
-      <input type="checkbox" bind:checked={settings.context_notifications} />{t("Контекстные уведомления (накопились просрочки, возврат к задаче «в работе»)")}</label>
+      <Switch bind:checked={settings.context_notifications} />{t("Контекстные уведомления (накопились просрочки, возврат к задаче «в работе»)")}</label>
     <label class="check" style="margin-top:6px;">
-      <input type="checkbox" bind:checked={settings.focus_mode_auto} />{t("Фокус-режим: авто-пауза уведомлений на время помодоро-работы и активных тайм-блоков")}</label>
+      <Switch bind:checked={settings.focus_mode_auto} />{t("Фокус-режим: авто-пауза уведомлений на время помодоро-работы и активных тайм-блоков")}</label>
     <label class="field" style="margin-top:8px;">
       <span class="label">{t("Утренняя сводка (HH:MM, пусто = выкл)")}</span>
       <input type="time" bind:value={settings.morning_digest_time} />
@@ -1243,14 +1795,21 @@
     <ModelDownloader kind="whisper" />
   </section>
 
-  <button class="btn-primary" onclick={save} disabled={saving}>
-    {saving ? t("Сохранение...") : saved ? t("Сохранено ✓") : t("Сохранить")}
-  </button>
+  <!-- No "Save": the form writes itself. What is left is the receipt — without
+       it an autosaving screen gives no sign that anything was stored. -->
+  <p class="autosave-note" aria-live="polite">
+    {#if saving}{t("Сохранение...")}{:else if saved}{t("Сохранено ✓")}{:else}{t("Изменения сохраняются сами")}{/if}
+  </p>
 </div>
 
 <style>
+  /* A ceiling plus centring, not a ceiling alone: without `margin: 0 auto` the
+     form clung to the left edge and the empty half of a wide window read as a
+     cut-off screen rather than as margins. 900 keeps a settings line short
+     enough that its label stays next to its field. */
   .settings {
-    max-width: 560px;
+    max-width: 900px;
+    margin: 0 auto;
     padding-bottom: 24px;
   }
 
@@ -1274,12 +1833,10 @@
     max-width: 100%;
   }
 
-  /* A wrapped row would butt right up against the border: .seg has a single
-     border for them all, and the dividers only draw the vertical seams. */
-  .settings-tabs .settings-tab {
-    border-top: 1px solid transparent;
-  }
-
+  /* The transparent top border that used to sit here compensated for .seg's
+     single shared frame on a wrapped row. .seg--underline has no frame — only a
+     bottom line — so the compensation would now add a stray gap above the
+     second row of tabs. */
   .settings-tab {
     cursor: pointer;
   }
@@ -1309,10 +1866,19 @@
     font-size: 13px;
   }
 
-  .radio-row {
-    display: flex;
-    gap: 16px;
+  /* Replaced the .radio-row of native radios; the margin it carried lives on.
+     No top margin: the "Тема" caption above supplies the separation now, and
+     .sub-label already carries its own 6px below. Keeping both put 16px between
+     the caption and its own control while the accent presets below use 6 — the
+     caption looked attached to the wrong thing. */
+  .theme-seg {
     margin-bottom: 12px;
+  }
+
+  /* The gap the caption needs from the field above it. .sub-label is used both
+     here and for the accent presets, but only this one follows a form field. */
+  .theme-label {
+    margin-top: 12px;
   }
 
   .sub-label {
@@ -1326,6 +1892,90 @@
     gap: 6px;
     flex-wrap: wrap;
     align-items: center;
+  }
+
+  .autosave-note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-height: 18px;
+  }
+
+  .preset-select {
+    position: relative;
+    display: inline-block;
+    max-width: 260px;
+    width: 100%;
+  }
+
+  .preset-trigger {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    text-align: left;
+  }
+
+  .preset-trigger-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .preset-caret {
+    color: var(--text-secondary);
+    font-size: 10px;
+  }
+
+  /* Floats over the fields below instead of pushing them down: seventeen rows
+     would otherwise shift the whole section on every open. */
+  .preset-list {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px -12px rgba(0, 0, 0, .45);
+  }
+
+  /* Larger than the 11px dot used inline: in a list the swatch is the thing being
+     scanned, not a marker beside a word. */
+  .preset-select .swatch {
+    width: 16px;
+    height: 16px;
+    margin-right: 0;
+    vertical-align: 0;
+    flex-shrink: 0;
+  }
+
+  .preset-option {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 5px 8px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    text-align: left;
+  }
+
+  .preset-option:hover {
+    background: var(--bg-hover);
+  }
+
+  .preset-option.selected {
+    color: var(--accent);
+    font-weight: 600;
   }
 
   .input-row {
@@ -1356,6 +2006,85 @@
     height: 26px;
     padding: 0;
     border-radius: 4px;
+  }
+
+  /* A colour that is still the default gets a dashed frame: the swatch shows a
+     real colour either way, so without this there is no way to tell "this is
+     what the theme gives you" from "I picked exactly this". */
+  .color-input.is-default {
+    border: 1px dashed var(--text-secondary);
+    opacity: 0.75;
+  }
+
+  /* A saved set and its delete button share one row: the button sits on top of
+     the option rather than beside it, so the option itself keeps the full width
+     and stays a comfortable target. */
+  .custom-option {
+    display: flex;
+    align-items: center;
+  }
+
+  .custom-option .preset-option {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .option-del {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .option-del:hover {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+
+  .preset-name {
+    width: 160px;
+  }
+
+  /* Sits inside the label, so it only appears next to a field that actually
+     carries an override — an always-visible one would suggest every colour is
+     set. */
+  .unset-btn {
+    margin-left: auto;
+    padding: 0 5px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .unset-btn:hover {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+
+  .advanced-colors {
+    margin-top: 14px;
+  }
+
+  .advanced-colors summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    padding: 2px 0;
+  }
+
+  .advanced-colors summary:hover {
+    color: var(--text-primary);
+  }
+
+  .advanced-colors .color-grid {
+    margin-top: 10px;
   }
 
   .hint {
@@ -1442,6 +2171,14 @@
     min-width: 0;
   }
 
+  /* The category picker in a rule row. The native <select> it replaced was sized
+     by its widest option; Select fills its container instead, so the width is set
+     here rather than letting it collapse to nothing in the flex row. */
+  .rule-cat {
+    flex: 0 0 150px;
+    display: block;
+  }
+
   .rule-row input.cat-color {
     flex: 0 0 34px;
     width: 34px;
@@ -1463,7 +2200,7 @@
     margin: 12px 0 6px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
   }
   .keybind-group:first-of-type {
     margin-top: 0;

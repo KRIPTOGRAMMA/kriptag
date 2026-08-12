@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
+import { KEYBIND_ACTIONS, formatCombo } from "../src/lib/keybinds";
 
 // Смоук-набор против vite dev с моком Tauri (__TAURI_INTERNALS__).
 // Rust-слой в этих тестах не участвует — он покрыт `cargo test`.
@@ -72,6 +73,649 @@ async function createTask(page: Page, title: string) {
   await page.getByRole("button", { name: "Создать" }).click();
 }
 
+// Списки в модалке задачи и в мете заметки — свой компонент Select, а не родной
+// <select>: WebKitGTK рисует попап родного системной темой GTK, и на тёмной теме
+// он оставался белым. Поэтому здесь клик по кнопке и клик по пункту, а не
+// selectOption. Родные <select> (фильтры, Настройки, быстрый ввод) на месте, и
+// тесты на них по-прежнему ходят через selectOption.
+// Сам список рендерится position:fixed на верхнем уровне, вне модалки, поэтому
+// пункт ищется по странице целиком, даже когда кнопка искалась внутри scope.
+async function pickOption(page: Page, scope: Page | Locator, label: string, option: string | RegExp) {
+  // exact: «Проект» иначе цепляет и кнопку раздела «Проекты», а «Категория» —
+  // заголовки на других экранах.
+  await scope.getByRole("button", { name: label, exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).first().click();
+}
+
+// Списки модалки задачи рисуются своим компонентом именно потому, что родной
+// <select> в WebKitGTK красится системной темой GTK. Тест не может это увидеть
+// (Playwright гоняет headless-Chromium, где родной попап как раз слушается CSS),
+// поэтому проверяем то, что проверяемо: список — наша разметка на токенах темы,
+// он вне модалки и потому не обрезается ею, и выбор реально меняет значение.
+test("модалка задачи: списки свои, а не родные, и выбор доходит до поля", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await createTask(page, "задача со списками");
+  await taskByTitle(page, "задача со списками").locator(".task-main").dblclick();
+
+  const modal = page.locator(".modal");
+  // Ни одного родного <select>: если хоть один останется, рядом со своими он и
+  // будет тем самым белым списком, из-за которого всё затевалось.
+  await expect(modal.locator("select")).toHaveCount(0);
+
+  await modal.getByRole("button", { name: "Приоритет" }).click();
+  const list = page.locator('[role="listbox"]');
+  await expect(list).toBeVisible();
+
+  // Модалка прокручивается и обрезает содержимое, поэтому список должен быть
+  // position:fixed — тогда overflow предка ему не указ. Проверяем не место в
+  // DOM (там он как раз внутри .modal), а наблюдаемое следствие: список виден
+  // целиком и по нему реально попадает клик.
+  const vis = await list.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.x + r.width / 2, r.y + 5);
+    return {
+      position: getComputedStyle(el).position,
+      inWindow: r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0,
+      clickable: el.contains(hit) || el === hit,
+    };
+  });
+  expect(vis.position).toBe("fixed");
+  expect(vis.inWindow, "список вылез за окно").toBe(true);
+  expect(vis.clickable, "список перекрыт или обрезан").toBe(true);
+
+  // Фон берётся из токенов темы, а не остаётся системным.
+  const bg = await list.evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(bg).not.toBe("rgba(0, 0, 0, 0)");
+
+  await page.getByRole("option", { name: "Критический" }).click();
+  await expect(list).toHaveCount(0);
+  await expect(modal.getByRole("button", { name: "Приоритет" })).toContainText("Критический");
+
+  // Escape закрывает список, не трогая модалку.
+  await modal.getByRole("button", { name: "Приоритет" }).click();
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  await expect(modal).toBeVisible();
+
+  // И выбор долетает до задачи, а не остаётся в UI.
+  // exact: иначе локатор ловит ещё и «Сохранить как шаблон».
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await expect(page.locator(".modal")).toHaveCount(0);
+  await taskByTitle(page, "задача со списками").locator(".task-main").dblclick();
+  await expect(page.locator(".modal").getByRole("button", { name: "Приоритет" }))
+    .toContainText("Критический");
+});
+
+// Длинное название задачи растягивало список блокеров до своей ширины (замерено
+// 759px против 458 сейчас), и он уезжал за правый край окна — а в вебвью туда
+// нечем прокрутить. Чинится с двух сторон: потолок ширины + обрезка текста в
+// пункте, и зажим по ширине СПИСКА, а не кнопки, которая его открыла.
+test("списки: длинное название задачи не выносит список за край окна", async ({ page }) => {
+  const long = "Очень длинное название задачи которое совершенно точно не помещается ".repeat(6);
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [
+      { id: "long-one", title: long, status: "Todo", priority: "Medium", category: "Work",
+        tags: [], hidden: false, subtasks: [], created_at: now, updated_at: now },
+      { id: "target", title: "цель", status: "Todo", priority: "Medium", category: "Work",
+        tags: [], hidden: false, subtasks: [], created_at: now, updated_at: now },
+    ],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  for (const w of [1280, 800]) {
+    await page.setViewportSize({ width: w, height: 800 });
+    await page.locator(".task-row", { hasText: "цель" }).locator(".task-main").dblclick();
+    await page.locator(".modal")
+      .getByRole("button", { name: "Добавить блокер...", exact: true }).click();
+
+    const geom = await page.locator('[role="listbox"]').evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const opt = el.querySelector(".opt") as HTMLElement;
+      const or = opt.getBoundingClientRect();
+      const btn = document.querySelector(".sel-btn[aria-expanded=true]") as HTMLElement;
+      return {
+        right: r.right, left: r.left, winW: window.innerWidth, listW: r.width,
+        btnW: btn.getBoundingClientRect().width,
+        // Пункт обрезается, а не тянет список.
+        optClamped: opt.scrollWidth > opt.clientWidth + 1,
+        optH: or.height,
+        // Ширину пункту задаёт контейнер, а не собственный текст. Проверять надо
+        // именно это: -webkit-line-clamp в WebKitGTK не сработал, и пункт тянул
+        // список во весь экран — в Chromium этого было не видно.
+        optW: opt.getBoundingClientRect().width,
+        listScrollW: el.scrollWidth,
+        listClientW: el.clientWidth,
+      };
+    });
+
+    expect(geom.right, `список за правым краем на ${w}px`).toBeLessThanOrEqual(geom.winW);
+    expect(geom.left, `список за левым краем на ${w}px`).toBeGreaterThanOrEqual(0);
+    expect(geom.optClamped, "длинный пункт не обрезан").toBe(true);
+    // Ключевое: пункт не шире списка и ничего не торчит вбок. Прежняя проверка
+    // ловила только высоту в две строки — а она держалась на line-clamp, которого
+    // в WebKitGTK нет, так что тест был зелёным при сломанном экране.
+    expect(geom.optW, "пункт шире списка").toBeLessThanOrEqual(geom.listW);
+    expect(geom.listScrollW, "содержимое торчит вбок")
+      .toBeLessThanOrEqual(geom.listClientW + 1);
+    expect(geom.optH, "пункт выше одной строки").toBeLessThan(40);
+    // Потолок ширины — отдельная защита от зажима по краю: без него список
+    // остаётся в окне, но растягивается на всю его ширину (замерено 1276px из
+    // 1280). Список задач шириной в экран — это не список, а полоса.
+    // Не уже кнопки: список внутри собственного контрола выглядит сломанным.
+    expect(geom.listW, `список раздулся на ${w}px`)
+      .toBeLessThanOrEqual(Math.max(geom.btnW, 420) + 1);
+
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+  }
+});
+
+// Пункты обрезаны до одной строки, поэтому список задач — стопка почти одинакового
+// текста, и границу между соседями глазу не за что зацепить. Разделяет линия.
+test("списки: пункты разделены линией, подсветка её не разрывает", async ({ page }) => {
+  const now = new Date().toISOString();
+  const titles = ["первая задача", "вторая задача", "третья задача"];
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [
+      ...titles.map((t, i) => ({ id: `b${i}`, title: t, status: "Todo", priority: "Medium",
+        category: "Work", tags: [], hidden: false, subtasks: [], created_at: now, updated_at: now })),
+      { id: "tgt", title: "цель", status: "Todo", priority: "Medium", category: "Work",
+        tags: [], hidden: false, subtasks: [], created_at: now, updated_at: now },
+    ],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".task-row")
+    .filter({ has: page.getByText("цель", { exact: true }) }).locator(".task-main").dblclick();
+  await page.locator(".modal")
+    .getByRole("button", { name: "Добавить блокер...", exact: true }).click();
+
+  const sep = await page.evaluate(() => {
+    const opts = [...document.querySelectorAll(".opt")] as HTMLElement[];
+    const cs = (i: number) => getComputedStyle(opts[i]);
+    return {
+      // У первого линии нет: иначе список открывался бы черта под собственным
+      // отступом. У остальных — есть, и по токену темы, а не «серым вообще».
+      first: cs(0).borderTopWidth,
+      second: cs(1).borderTopWidth,
+      color: cs(1).borderTopColor,
+      // Радиус 0, иначе заливка отходит от линии и та выглядит рваной по краям.
+      radius: cs(1).borderTopLeftRadius,
+    };
+  });
+  expect(sep.first, "линия под первым пунктом").toBe("0px");
+  expect(sep.second, "пункты не разделены").toBe("1px");
+  expect(sep.color).not.toBe("rgba(0, 0, 0, 0)");
+  expect(sep.radius).toBe("0px");
+
+  // Подсветанная строка съедает касающиеся её линии — свою и следующего пункта, —
+  // иначе полоса выглядит перечёркнутой по обоим концам. Соседи сверху не трогаем.
+  await page.locator(".opt").nth(1).hover();
+  // Ждём не появления класса, а конца перехода: у button в app.css есть
+  // transition border-color 0.12s, и замер сразу после hover ловил цвет на
+  // полпути (замерено rgba(...,0.835)) — тест падал на верной вёрстке.
+  await expect(page.locator(".opt.active")).toHaveCount(1);
+  await expect
+    .poll(async () => page.locator(".opt.active")
+      .evaluate(el => getComputedStyle(el).borderTopColor))
+    .toBe("rgba(0, 0, 0, 0)");
+  const hov = await page.evaluate(() => {
+    const opts = [...document.querySelectorAll(".opt")] as HTMLElement[];
+    const i = opts.findIndex(o => o.classList.contains("active"));
+    const cs = (k: number) => getComputedStyle(opts[k]);
+    return {
+      i,
+      own: cs(i).borderTopColor,
+      next: cs(i + 1).borderTopColor,
+      prev: cs(i - 1).borderTopColor,
+      // Высоты не должны прыгать: линия становится прозрачной, а не исчезает.
+      heights: opts.map(o => Math.round(o.getBoundingClientRect().height)),
+    };
+  });
+  expect(hov.own, "своя линия не спрятана").toBe("rgba(0, 0, 0, 0)");
+  expect(hov.next, "линия следующего не спрятана").toBe("rgba(0, 0, 0, 0)");
+  expect(hov.prev, "съедена лишняя линия сверху").not.toBe("rgba(0, 0, 0, 0)");
+  expect(new Set(hov.heights.slice(1)).size, "строки прыгают по высоте").toBe(1);
+});
+
+// Диалоги «Проекты» и «Новый умный список» несли class="modal dialog", но .dialog
+// в Tasks.svelte никто не объявлял — только .modal в app.css. Получалась карточка
+// без внутренних отступов: заголовок в пикселе от рамки, кнопки впритык к краю.
+// Выглядело как обрезанное окно. Оба должны совпадать с модалкой задачи рядом.
+test("диалоги Задач: отступы как у модалки задачи, а не впритык к рамке", async ({ page }) => {
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [{ id: "t1", title: "задача", status: "Todo", priority: "Medium", category: "Work",
+      tags: [], hidden: false, subtasks: [], created_at: now, updated_at: now }],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  // Замер берём с самого диалога: padding и то, насколько отступает от рамки его
+  // первый элемент. Второе важнее — именно оно и выглядело обрезанным.
+  const probe = () => page.locator(".modal.dialog").evaluate((d) => {
+    const r = d.getBoundingClientRect();
+    const first = d.firstElementChild as HTMLElement;
+    return {
+      padding: getComputedStyle(d).padding,
+      maxWidth: getComputedStyle(d).maxWidth,
+      firstGap: Math.round(first.getBoundingClientRect().left - r.left),
+    };
+  });
+
+  await page.locator(".task-row").first().locator(".task-main").dblclick();
+  const modal = await probe();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Проекты", exact: true }).click();
+  const projects = await probe();
+  await page.locator(".modal.dialog").getByRole("button", { name: "Закрыть" }).click();
+
+  await page.locator(".smart-list-add").click();
+  const smart = await probe();
+
+  // Эталон — модалка задачи: у неё отступы были всегда.
+  expect(modal.padding, "у модалки задачи пропали отступы").not.toBe("0px");
+  expect(modal.firstGap).toBeGreaterThan(10);
+
+  for (const [name, d] of [["Проекты", projects], ["Умный список", smart]] as const) {
+    expect(d.padding, `${name}: контент впритык к рамке`).toBe(modal.padding);
+    expect(d.maxWidth, `${name}: ширина не как у модалки задачи`).toBe(modal.maxWidth);
+    expect(d.firstGap, `${name}: заголовок прижат к рамке`).toBe(modal.firstGap);
+  }
+});
+
+// Булевы настройки — свой тумблер (Switch.svelte): родной чекбокс в WebKitGTK
+// рисуется системной темой GTK мимо токенов. Настоящий <input> под ним остался
+// ради семантики, но он прозрачный, поэтому check()/uncheck() до него не
+// достучатся — кликать надо по обёртке. Состояние по-прежнему читается с input.
+async function flipSwitch(scope: Page | Locator, labelText: string) {
+  await scope.locator("label", { hasText: labelText }).locator(".sw").first().click();
+}
+
+// Булевы настройки рисуются своим тумблером, а не родным чекбоксом: в WebKitGTK
+// родной берёт форму и цвет от системной темы GTK, мимо токенов приложения (та же
+// причина, что у выпадающих списков и галочек подзадач). Увидеть это тестом
+// нельзя — Playwright гоняет Chromium, — поэтому проверяем проверяемое: разметка
+// наша, состояние доступно клавиатуре и скринридеру, клик по обёртке переключает.
+test("настройки: булевы значения — свой тумблер, доступный с клавиатуры", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+
+  const label = page.locator("label", { hasText: "Фокус-режим: авто-пауза уведомлений" });
+  const sw = label.locator(".sw").first();
+  const input = label.locator("input[type=checkbox]").first();
+
+  await expect(sw).toBeVisible();
+  // Родной <input> остался ради семантики, но спрятан прозрачностью, а не
+  // display:none — иначе он выпал бы из дерева доступности вместе с состоянием.
+  await expect(input).toHaveCSS("opacity", "0");
+  await expect(input).toHaveCount(1);
+
+  const before = await input.isChecked();
+  await sw.click();
+  await expect(input).toBeChecked({ checked: !before });
+
+  // Клавиатура работает через тот же настоящий чекбокс.
+  await input.focus();
+  await page.keyboard.press("Space");
+  await expect(input).toBeChecked({ checked: before });
+
+  // Заливка и положение — из токенов темы, а не системные.
+  await sw.click();
+  const look = await sw.evaluate((el) => {
+    const track = el.querySelector(".track") as HTMLElement;
+    const knob = el.querySelector(".knob") as HTMLElement;
+    return {
+      trackBg: getComputedStyle(track).backgroundColor,
+      knobShift: getComputedStyle(knob).transform,
+    };
+  });
+  expect(look.trackBg).not.toBe("rgba(0, 0, 0, 0)");
+  // Ручка уехала вправо: состояние читается положением, а не только цветом.
+  expect(look.knobShift, "ручка не сдвинулась").not.toBe("none");
+
+  // Ручка светлая и с тенью в ОБОИХ состояниях: цвет у неё не меняется, глаз
+  // следит за движением, а тень отделяет её от залитой акцентом дорожки.
+  const knob = sw.locator(".knob");
+  const knobOn = await knob.evaluate(el => ({
+    bg: getComputedStyle(el).backgroundColor,
+    shadow: getComputedStyle(el).boxShadow,
+  }));
+  expect(knobOn.shadow, "у ручки нет тени").not.toBe("none");
+  await sw.click();
+  const knobOff = await knob.evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(knobOff, "ручка меняет цвет вместо того, чтобы ездить").toBe(knobOn.bg);
+
+  // Дорожка ВЫКЛЮЧЕННОГО тумблера обязана иметь видимую рамку: на светлой теме
+  // карточка белая, и без рамки выключенное состояние сливается с фоном
+  // (посчитанный контраст заливки к карточке — 1.11, то есть его нет).
+  //
+  // Читается объявленное правило, а не вычисленный стиль элемента: под курсором
+  // .sw:hover красит рамку акцентом, и вычисленное значение показывало рамку
+  // видимой даже при border-color: transparent в самом правиле — проверено
+  // поломкой, тест проходил на сломанном коде.
+  const declared = await page.evaluate(() => {
+    for (const sheet of [...document.styleSheets]) {
+      let rules: CSSRuleList;
+      try { rules = sheet.cssRules; } catch { continue; }
+      for (const r of [...rules] as CSSStyleRule[]) {
+        if (!r.selectorText || !/\.track/.test(r.selectorText)) continue;
+        if (/:hover|:checked|:focus/.test(r.selectorText)) continue;
+        if (r.style.border || r.style.borderColor) {
+          return r.style.border || r.style.borderColor;
+        }
+      }
+    }
+    return null;
+  });
+  expect(declared, "у выключенной дорожки не объявлена рамка").toBeTruthy();
+  expect(declared, "рамка выключенной дорожки прозрачна")
+    .not.toMatch(/transparent|rgba\(0, 0, 0, 0\)/);
+});
+
+// Язык и ИИ-провайдер — свой Select, а не родной <select>: в WebKitGTK попап
+// родного рисуется системной темой GTK мимо токенов. Кнопка + пункт вместо
+// selectOption. Список рендерится position:fixed на верхнем уровне, поэтому
+// пункт ищется по странице, а не внутри метки.
+async function pickSetting(page: Page, labelText: string, option: string | RegExp) {
+  await page.locator("label", { hasText: labelText })
+    .locator("button[aria-haspopup=listbox]").first().click();
+  await page.getByRole("option", { name: option, exact: true }).first().click();
+}
+
+// В Настройках не должно остаться родных <select>: в WebKitGTK их попап рисует
+// системная тема GTK мимо токенов приложения. Проверяется весь экран разом, а не
+// отдельные списки, — иначе следующий добавленный список тихо проедет мимо.
+test("настройки: родных списков не осталось, у темы своя подпись", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Все вкладки: секции скрыты классом, но в DOM присутствуют.
+  const natives = await page.evaluate(() =>
+    [...document.querySelectorAll(".settings select")].map(
+      s => s.closest("label")?.textContent?.trim().slice(0, 30) ?? "?"));
+  expect(natives, "остался родной <select>").toEqual([]);
+
+  // Пресеты акцента — свой листбокс, а не <select>, и это не должно откатиться.
+  await expect(page.locator(".preset-select")).toHaveCount(1);
+
+  // У переключателя темы есть подпись, как у всего остального в этой панели.
+  // Одних отступов не хватило: «Язык» сверху и «Пресеты акцента» снизу подписаны,
+  // и безымянный ряд кнопок между ними читался как продолжение поля языка.
+  const themeLabel = page.locator(".sub-label", { hasText: "Тема" }).first();
+  await expect(themeLabel).toBeVisible();
+
+  // Подпись оформлена и отбита так же, как соседняя «Пресеты акцента», иначе
+  // рядом стояли бы два заголовка одного уровня, выглядящие по-разному.
+  const rhythm = await page.evaluate(() => {
+    const lang = [...document.querySelectorAll("label.field")]
+      .find(l => l.textContent?.includes("Язык")) as HTMLElement;
+    const labels = [...document.querySelectorAll(".sub-label")] as HTMLElement[];
+    const theme = labels.find(l => l.textContent?.trim() === "Тема")!;
+    const preset = labels.find(l => l.textContent?.includes("Пресеты"))!;
+    const seg = document.querySelector(".theme-seg") as HTMLElement;
+    const box = document.querySelector(".preset-select") as HTMLElement;
+    const r = (e: HTMLElement) => e.getBoundingClientRect();
+    const st = (e: HTMLElement) => {
+      const c = getComputedStyle(e);
+      return `${c.fontSize}/${c.color}`;
+    };
+    return {
+      langToLabel: Math.round(r(theme).top - r(lang).bottom),
+      themeLabelToControl: Math.round(r(seg).top - r(theme).bottom),
+      presetLabelToControl: Math.round(r(box).top - r(preset).bottom),
+      sameStyle: st(theme) === st(preset),
+    };
+  });
+  expect(rhythm.sameStyle, "подпись темы оформлена иначе, чем соседняя").toBe(true);
+  expect(rhythm.langToLabel, "подпись темы слиплась с полем языка").toBeGreaterThanOrEqual(8);
+  // Подпись должна принадлежать своему контролу, а не висеть между двумя.
+  expect(rhythm.themeLabelToControl).toBe(rhythm.presetLabelToControl);
+});
+
+// У главной кнопки по краю был виден шов. Причина не в градиенте, а в рамке:
+// базовое правило задаёт `border: 1px solid`, .btn-primary гасила только цвет, а
+// прозрачная рамка всё равно занимает свой пиксель — и при background-clip:
+// border-box заливка рисуется ПОД ней, размазывая крайние цвета градиента по
+// кромке. Лечится снятием рамки, а не подбором цвета.
+test("кнопки: у главной нет прозрачной рамки и она не ниже соседей", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  const geom = await page.evaluate(() => {
+    const prim = document.querySelector(".btn-primary") as HTMLElement;
+    const cs = getComputedStyle(prim);
+    // Соседи по той же строке: главная кнопка не должна выбиваться по высоте.
+    const sibs = [...prim.parentElement!.querySelectorAll("button")] as HTMLElement[];
+    const plain = sibs.find(b => !b.classList.contains("btn-primary")
+      && !b.closest(".seg") && b !== prim);
+    return {
+      borderWidth: cs.borderTopWidth,
+      borderColor: cs.borderTopColor,
+      primH: Math.round(prim.getBoundingClientRect().height),
+      plainH: plain ? Math.round(plain.getBoundingClientRect().height) : null,
+    };
+  });
+
+  // Прозрачная рамка — именно то сочетание, которое давало шов.
+  expect(
+    geom.borderWidth !== "0px" && geom.borderColor === "rgba(0, 0, 0, 0)",
+    "у .btn-primary снова прозрачная рамка — по краю будет шов",
+  ).toBe(false);
+
+  // Снятие рамки укорачивает кнопку на 2px, если не вернуть их паддингом.
+  expect(geom.plainH, "не с чем сравнить высоту").not.toBeNull();
+  expect(geom.primH, "главная кнопка не совпадает по высоте с соседней")
+    .toBe(geom.plainH);
+});
+
+// Кнопки окна висят над правым верхним углом (WindowControls — position:fixed,
+// прозрачный, 32px). Раньше каждый экран уворачивался от них сам: отступ справа в
+// каждой шапке плюс вырез clip-path в карточке Заметок — единственном экране, чей
+// корень это залитая панель. Вырез оставлял в скруглённом углу заметную ступеньку
+// и читался как обрезка. Теперь полоса целиком принадлежит титлбару: контент
+// начинается под ней, и уворачиваться никому не нужно.
+test("кнопки окна: контент начинается под ними, а не обтекает их", async ({ page }) => {
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    tasks: [],
+    settings: { onboarding_complete: true },
+    notes: [{ id: "n1", title: "заметка", content: "текст", tags: [],
+              created_at: now, updated_at: now }],
+  });
+  await withMock(page);
+  await page.setViewportSize({ width: 1400, height: 860 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Заметки" }).first().click();
+  await page.locator(".note-item").first().click();
+  await page.locator(".editor-head").waitFor();
+
+  const notes = await page.evaluate(() => {
+    const ctl = document.querySelector(".controls")!.getBoundingClientRect();
+    const card = document.querySelector(".notes") as HTMLElement;
+    // elementsFromPoint, а не elementFromPoint: сверху лежит прозрачный титлбар
+    // со своей кнопкой, и одиночный вариант возвращал бы её, никогда не добираясь
+    // до карточки под ней — проверка проходила бы и на сломанном коде.
+    const under = (document.elementsFromPoint(
+      ctl.left + ctl.width / 2, ctl.top + ctl.height / 2) as HTMLElement[])
+      .some(e => e === card || card.contains(e));
+    return {
+      under,
+      cardTop: Math.round(card.getBoundingClientRect().top),
+      btnBottom: Math.round(ctl.bottom),
+      // Угол остаётся скруглённым и невырезанным — именно это выглядело обрезкой.
+      radius: parseFloat(getComputedStyle(card).borderTopRightRadius),
+      clip: getComputedStyle(card).clipPath,
+    };
+  });
+
+  expect(notes.under, "карточка заметок под кнопками окна").toBe(false);
+  // Вплотную к нижнему краю кнопок, а не под всей полосой титлбара: кнопки 24px
+  // и центрированы в 32px, так что ниже них остаются 4px пустоты — на залитой
+  // панели они читались бы как зазор над ней, а не как воздух.
+  expect(notes.cardTop, "карточка залезает на кнопки")
+    .toBeGreaterThanOrEqual(notes.btnBottom);
+  expect(notes.cardTop - notes.btnBottom, "карточка не дотянута до кнопок")
+    .toBeLessThanOrEqual(6);
+  expect(notes.radius, "у карточки пропало скругление").toBeGreaterThan(0);
+  expect(notes.clip, "вернулся вырез угла").toBe("none");
+
+  // Шапки экранов больше не резервируют полосу справа: она принадлежит титлбару,
+  // и лишний отступ снова оставил бы пустоту, на которую жаловались раньше.
+  await page.getByRole("button", { name: "Задачи" }).first().click();
+  const tasks = await page.evaluate(() => {
+    const head = document.querySelector(".page-head") as HTMLElement;
+    const ctl = document.querySelector(".controls")!.getBoundingClientRect();
+    const hr = head.getBoundingClientRect();
+    return {
+      padRight: parseFloat(getComputedStyle(head).paddingRight),
+      headBelowButtons: Math.round(hr.top) >= Math.round(ctl.bottom),
+    };
+  });
+  expect(tasks.padRight, "шапка Задач всё ещё резервирует полосу под кнопки")
+    .toBeLessThan(40);
+  expect(tasks.headBelowButtons, "шапка Задач заходит под кнопки").toBe(true);
+});
+
+// Сегменты .seg скруглены по краям: overflow:hidden у контейнера НЕ обрезает
+// собственный фон дочерней кнопки по радиусу, и залитый акцентом крайний сегмент
+// торчал прямыми углами из скруглённой рамки.
+test("переключатели: крайние сегменты подхватывают скругление рамки", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  const radii = await page.evaluate(() => {
+    const seg = document.querySelector(".seg") as HTMLElement;
+    const btns = [...seg.querySelectorAll("button")] as HTMLElement[];
+    const cs = (e: HTMLElement) => getComputedStyle(e);
+    return {
+      container: cs(seg).borderTopLeftRadius,
+      first: cs(btns[0]).borderTopLeftRadius,
+      last: cs(btns[btns.length - 1]).borderTopRightRadius,
+      middleLeft: btns.length > 2 ? cs(btns[1]).borderTopLeftRadius : "0px",
+    };
+  });
+
+  expect(parseFloat(radii.first), "первый сегмент не скруглён").toBeGreaterThan(0);
+  expect(parseFloat(radii.last), "последний сегмент не скруглён").toBeGreaterThan(0);
+  // Внутренние стыки остаются прямыми, иначе сегменты распадаются на пилюли.
+  expect(radii.middleLeft).toBe("0px");
+  // Скругление сегмента чуть меньше контейнерного — на толщину его рамки.
+  expect(parseFloat(radii.first)).toBeLessThan(parseFloat(radii.container));
+});
+
+// Действия заметки уехали в меню «…» в шапке редактора: шесть иконок подряд
+// стояли ровно под кнопками окна того же размера, и два набора читались как один.
+// Zen остался снаружи — им пользуются во время чтения, и он должен работать
+// изнутри zen-режима, где остальная шапка скрыта.
+async function noteAction(page: Page, label: string | RegExp) {
+  await page.getByRole("button", { name: "Действия с заметкой" }).click();
+  await page.locator('[role="menuitem"]', { hasText: label }).first().click();
+}
+
+// Карточку задачи открывает ДВОЙНОЙ клик: одинарный теперь правит название прямо
+// в строке. Хелпер, а не dblclick() по месту, чтобы следующая смена жеста была
+// одной правкой, а не двадцатью.
+async function openTaskCard(page: Page, title: string | RegExp) {
+  await page.locator(".task-row", { hasText: title }).first().locator(".task-main").dblclick();
+}
+
+// Одинарный клик правит название прямо в строке, двойной открывает карточку.
+// Название — то, что правят чаще всего, и ходить ради опечатки в модалку было
+// самым долгим путём.
+test("строка задачи: клик правит название, двойной клик открывает карточку", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await createTask(page, "исходное название");
+
+  const row = page.locator(".task-row", { hasText: "исходное название" });
+  await row.locator(".task-main").click();
+
+  // Модалка не открылась — правка идёт в строке, поле уже под кареткой.
+  await expect(page.locator(".modal")).toHaveCount(0);
+  const editor = page.locator(".task-title-edit");
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue("исходное название");
+
+  await editor.fill("правленое название");
+  await editor.press("Enter");
+  await expect(page.locator(".task-title-edit")).toHaveCount(0);
+  await expect(page.getByText("правленое название")).toBeVisible();
+
+  // Escape откатывает, а не сохраняет.
+  await page.locator(".task-row", { hasText: "правленое название" }).locator(".task-main").click();
+  await page.locator(".task-title-edit").fill("это не должно сохраниться");
+  await page.locator(".task-title-edit").press("Escape");
+  await expect(page.locator(".task-title-edit")).toHaveCount(0);
+  await expect(page.getByText("правленое название")).toBeVisible();
+  await expect(page.getByText("это не должно сохраниться")).toHaveCount(0);
+
+  // Уход фокуса сохраняет — как в быстром слоте.
+  await page.locator(".task-row", { hasText: "правленое название" }).locator(".task-main").click();
+  await page.locator(".task-title-edit").fill("сохранено по блюру");
+  await page.locator(".page-title").click();
+  await expect(page.locator(".task-title-edit")).toHaveCount(0);
+  await expect(page.getByText("сохранено по блюру")).toBeVisible();
+
+  // Пустое название не способ удалить задачу — откатывается к прежнему.
+  await page.locator(".task-row", { hasText: "сохранено по блюру" }).locator(".task-main").click();
+  await page.locator(".task-title-edit").fill("   ");
+  await page.locator(".task-title-edit").press("Enter");
+  await expect(page.getByText("сохранено по блюру")).toBeVisible();
+
+  // Двойной клик открывает карточку и не оставляет за собой поле правки.
+  await page.locator(".task-row", { hasText: "сохранено по блюру" }).locator(".task-main").dblclick();
+  await expect(page.locator(".modal")).toBeVisible();
+  await expect(page.locator(".task-title-edit")).toHaveCount(0);
+});
+
+// Действия строки задачи живут в контекстном меню по правой кнопке (v0.9.98):
+// раньше это были шесть иконок, появлявшихся по наведению. Левый клик по строке
+// по-прежнему открывает модалку, поэтому меню открывается только правой.
+async function rowMenu(page: Page, taskTitle: string, item: string | RegExp) {
+  await page.locator(".task-row", { hasText: taskTitle }).first().click({ button: "right" });
+  await page.locator('[role="menuitem"]', { hasText: item }).first().click();
+}
+
+// Пресеты тем — свой listbox, а не <select>: цветной свотч в <option> не живёт.
+// Выбор всегда через открытие списка, поэтому один помощник на все тесты.
+// Настройки сохраняются сами (дебаунс 800 мс), кнопки «Сохранить» там больше нет.
+// Тест обязан дождаться записи, иначе reload прочитает старое состояние.
+async function waitSettingsSaved(page: Page) {
+  await expect(page.locator(".autosave-note")).toContainText("Сохранено", { timeout: 5000 });
+}
+
+// Свои наборы — второй такой же список на экране, поэтому берётся по позиции.
+function customPresetSelect(page: Page) {
+  return page.locator(".preset-select").nth(1);
+}
+
+async function chooseCustomPreset(page: Page, name: string) {
+  const sel = customPresetSelect(page);
+  await sel.locator(".preset-trigger").click();
+  await sel.locator(".preset-option", { hasText: name }).click();
+}
+
+async function choosePreset(page: Page, name: string) {
+  await page.locator(".preset-trigger").click();
+  await page.locator(".preset-option", { hasText: name }).click();
+}
+
 // Живой markdown-редактор (CodeMirror 6, v0.6.9) — contenteditable, не textarea.
 // Заменяет весь текст: клик → выделить всё → напечатать.
 function noteEditor(page: Page) {
@@ -98,23 +742,68 @@ test("онбординг проходится до конца и больше н
   await withMock(page);
   await page.goto("/");
 
-  await expect(page.getByText("Добро пожаловать в AI Notes")).toBeVisible();
-  await page.getByRole("button", { name: "Начать настройку" }).click();
-  await expect(page.getByText("ИИ-помощник")).toBeVisible();
-  await page.getByRole("button", { name: "Далее" }).click();
+  // v0.10.14: первый шаг — выбор языка. Он идёт до всего остального: дальше один
+  // текст, и выбирать язык позже значило бы прочитать весь онбординг не на том.
+  await expect(page.getByText("Выберите язык интерфейса")).toBeVisible();
+  await expect(page.getByText("Русский")).toBeVisible();
+  await expect(page.getByText("English")).toBeVisible();
+  // Выбираем ДРУГОЙ язык, а не язык по умолчанию: с "ru" проверка сохранения
+  // прошла бы и без записи — в сиде уже лежит "ru".
+  await page.getByText("English").click();
+  // Смена применяется сразу: остальной онбординг — сплошной текст, и увидеть
+  // результат до конца настройки можно только так.
+  await expect(page.getByText("Choose the interface language")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+
+  await expect(page.getByText("Welcome to Kriptag")).toBeVisible();
+  await page.getByRole("button", { name: "Start setup" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
   // шаг 3 (Wayland) пропущен: is_wayland → false
-  await expect(page.getByText("Автозагрузка и хоткеи")).toBeVisible();
-  await page.getByRole("button", { name: "Далее" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
   // v0.9.64: шаг голосового ввода — необязательный, проходится насквозь
-  await expect(page.getByText("Голосовой ввод")).toBeVisible();
-  await page.getByRole("button", { name: "Далее" }).click();
-  await expect(page.getByText("Готово!")).toBeVisible();
-  await page.getByRole("button", { name: "Начать", exact: true }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
 
   // главный экран, флаг сохранён в «БД»
-  await expect(page.getByRole("heading", { name: "Задачи" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
   const db = JSON.parse(await page.evaluate(() => localStorage.getItem("__mock_db")!));
   expect(db.settings.onboarding_complete).toBe(true);
+  // Выбранный язык сохраняется, а не остаётся только в памяти.
+  expect(db.settings.language, "язык из онбординга не сохранился").toBe("en");
+});
+
+// v0.10.14: страница с биндами композитора — только на Wayland. На X11 и Windows
+// глобальные хоткеи регистрирует само приложение, и конфиг композитора там ничего
+// не значит; шага быть не должно вовсе.
+test("онбординг: страница биндов композитора только на Wayland", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: false } });
+  await withMock(page);
+  // Мок отдаёт is_wayland: false — подменяем только для этого теста, чтобы не
+  // трогать общий помощник ради одного шага.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __forceWayland?: boolean };
+    w.__forceWayland = true;
+  });
+  await page.goto("/");
+
+  // Проходим до шага с конфигом.
+  await page.getByRole("button", { name: "Далее" }).click();
+  await page.getByRole("button", { name: "Начать настройку" }).click();
+  await page.getByRole("button", { name: "Далее" }).click();
+  await expect(page.getByText("Мониторинг на Wayland")).toBeVisible();
+  await page.getByRole("button", { name: "Далее" }).click();
+  await expect(page.getByText("Автозагрузка и хоткеи")).toBeVisible();
+  await page.getByRole("button", { name: "Далее" }).click();
+
+  await expect(page.getByText("Хоткеи в композиторе")).toBeVisible();
+  // Готовые строки, а не описание: их копируют целиком.
+  const conf = page.locator(".conf-block pre").first();
+  await expect(conf).toContainText("bind = CTRL SHIFT, N, exec, kriptag --quick-task");
+  // Все четыре быстрых ввода, а не только задача.
+  for (const flag of ["--quick-task", "--quick-note", "--quick-clip", "--quick-pinned"]) {
+    await expect(conf, `в конфиге нет ${flag}`).toContainText(flag);
+  }
+  await expect(page.locator(".conf-block pre").nth(1), "нет варианта для Sway").toContainText("bindsym Control+Shift+n exec kriptag");
 });
 
 test("задача: создание, редактирование, выполнение, удаление из истории", async ({ page }) => {
@@ -124,8 +813,8 @@ test("задача: создание, редактирование, выполн
   await createTask(page, "тестовая задача");
   await expect(page.getByText("тестовая задача")).toBeVisible();
 
-  // редактирование по клику на строку
-  await page.locator(".task-main", { hasText: "тестовая задача" }).click();
+  // карточка открывается двойным кликом: одинарный правит название в строке
+  await page.locator(".task-main", { hasText: "тестовая задача" }).dblclick();
   await expect(page.getByText("Редактировать задачу")).toBeVisible();
   await page.getByPlaceholder("Название задачи").fill("переименованная задача");
   // exact — иначе матчится и «Сохранить как шаблон» (шаблоны чеклистов, v0.8.3)
@@ -140,11 +829,20 @@ test("задача: создание, редактирование, выполн
   // v0.9.45: запись отложена на паузу набора
   await expect(page.locator(".chip-sub")).toHaveText(/0\/1/);
 
-  // v0.8.2: чип с подзадачами визуально выделен; все выполнены — зеленеет
   await expect(page.locator(".chip-sub")).toHaveClass(/has-subs/);
-  await page.locator(".task-sub-panel .cm-sub-checkbox").click();
-  await expect(page.locator(".chip-sub")).toHaveClass(/subs-done/);
-  await expect(page.locator(".chip-sub")).toHaveText(/1\/1/);
+
+  // Вторая подзадача ДО отметки первой: иначе первая была бы последней
+  // неотмеченной и сама закрыла бы задачу (complete_if_all_subtasks_done), а
+  // дальше этот тест выполняет её вручную и идёт за ней в историю и Корзину.
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.insertText("второй шаг");
+  await expect(page.locator(".chip-sub")).toHaveText(/0\/2/);
+
+  // v0.8.2: чип с подзадачами визуально выделен; все выполнены — зеленеет.
+  await page.locator(".task-sub-panel .cm-sub-checkbox").first().click();
+  await expect(page.locator(".chip-sub")).toHaveText(/1\/2/);
+  await expect(page.locator(".chip-sub")).not.toHaveClass(/subs-done/);
 
   // выполнение — уходит из активных, появляется в истории
   await page.locator(".task-check").click();
@@ -161,6 +859,72 @@ test("задача: создание, редактирование, выполн
 });
 
 // v0.9.24: завершение родителя каскадом закрывает его чеклист — раньше
+// v0.9.98: действия строки уехали в контекстное меню. Тест держит три вещи,
+// каждая из которых ломалась бы молча: меню вообще открывается правой кнопкой,
+// левый клик по-прежнему ведёт в модалку (жест старше меню), и Escape закрывает
+// меню, не оставляя невидимый backdrop поверх списка.
+test("контекстное меню задачи: правая кнопка открывает, Escape закрывает, левый клик по-прежнему модалка", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await createTask(page, "задача с меню");
+
+  const row = page.locator(".task-row", { hasText: "задача с меню" }).first();
+  await row.click({ button: "right" });
+  await expect(page.locator('[role="menu"]')).toBeVisible();
+  await expect(page.locator('[role="menuitem"]', { hasText: "Удалить" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+
+  // Backdrop убран вместе с меню: иначе он бы перехватил этот клик.
+  await page.locator(".task-main", { hasText: "задача с меню" }).dblclick();
+  await expect(page.getByText("Редактировать задачу")).toBeVisible();
+});
+
+// v0.9.99: фильтр по категориям. Держит две вещи: что он вообще фильтрует и что
+// выбор переживает перезагрузку (он лежит в localStorage рядом с фильтром
+// проектов). Заодно — что повторный клик снимает фильтр, иначе из него нет
+// выхода, кроме как через «Все».
+test("фильтр по категориям: сужает список, снимается повторным кликом, переживает перезагрузку", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await createTask(page, "рабочая задача");
+  await page.locator(".task-main", { hasText: "рабочая задача" }).dblclick();
+  await pickOption(page, page, "Категория", "Работа");
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+
+  await createTask(page, "домашняя задача");
+  await page.locator(".task-main", { hasText: "домашняя задача" }).dblclick();
+  await pickOption(page, page, "Категория", "Дом");
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+
+  const catFilter = page.locator(".cat-filter");
+  await catFilter.getByRole("button", { name: "Работа" }).click();
+  await expect(page.locator(".task-main", { hasText: "рабочая задача" })).toBeVisible();
+  await expect(page.locator(".task-main", { hasText: "домашняя задача" })).toHaveCount(0);
+
+  // выбор пережил перезагрузку
+  await page.reload();
+  await expect(page.locator(".task-main", { hasText: "домашняя задача" })).toHaveCount(0);
+
+  // повторный клик по той же категории снимает фильтр
+  await catFilter.getByRole("button", { name: "Работа" }).click();
+  await expect(page.locator(".task-main", { hasText: "домашняя задача" })).toBeVisible();
+});
+
+// v0.9.98: пункт «Удалить» в меню делает то же, что делала иконка ✕.
+test("контекстное меню задачи: удаление уносит задачу из списка", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await createTask(page, "задача на удаление");
+  await rowMenu(page, "задача на удаление", "Удалить");
+
+  await expect(page.locator(".task-main", { hasText: "задача на удаление" })).toHaveCount(0);
+});
+
 // в истории лежала Done-задача с невыполненными подзадачами.
 test("завершение задачи проставляет done всем её подзадачам", async ({ page }) => {
   await withMock(page);
@@ -303,7 +1067,7 @@ test("технический префикс ошибки переводится,
   await withMock(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
   await page.getByRole("button", { name: /Tasks/ }).first().click();
 
   await page.evaluate(() => {
@@ -329,7 +1093,7 @@ test("доменная ошибка не расчленяется по двое�
   await withMock(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
   await page.getByRole("button", { name: /Tasks/ }).first().click();
 
   await page.evaluate(() => {
@@ -444,14 +1208,14 @@ test("повторяющаяся задача в работе: ✓ закрыв�
   await page.goto("/");
 
   await createTask(page, "зарядка");
-  await page.locator(".task-main", { hasText: "зарядка" }).click();
+  await page.locator(".task-main", { hasText: "зарядка" }).dblclick();
   const modal = page.locator(".modal");
-  await modal.getByLabel("Повтор").selectOption("Daily");
+  await pickOption(page, modal, "Повтор", "Каждый день");
   await modal.getByRole("button", { name: "Сохранить", exact: true }).click();
 
   // задача в работе — трекинг запущен, статус InProgress
-  await page.getByTitle("Начать трекинг").first().click();
-  await expect(page.getByTitle("Остановить трекинг").first()).toBeVisible();
+  await rowMenu(page, "зарядка", "Начать трекинг");
+  await expect(page.locator(".track")).toContainText("зарядка");
 
   // статус виден только на Доске: в Списке его не рендерят — именно поэтому
   // баг и выглядел как «клик по ✓ вообще ничего не делает».
@@ -465,7 +1229,8 @@ test("повторяющаяся задача в работе: ✓ закрыв�
   // прогон закрыт: задача осталась в активных (повтор не уходит в историю),
   // вернулась в Todo, таймер остановлен (раньше он продолжал тикать)
   await expect(page.locator(".task-main", { hasText: "зарядка" })).toBeVisible();
-  await expect(page.getByTitle("Начать трекинг").first()).toBeVisible();
+  // виджет трекинга исчез — таймер остановлен вместе с прогоном
+  await expect(page.locator(".track")).toHaveCount(0);
 
   await page.locator(".seg button", { hasText: "Доска" }).click();
   await expect(page.locator(".column", { hasText: "Todo" })
@@ -481,7 +1246,7 @@ test("повтор по дням недели: выбор в модалке со
   await page.getByRole("button", { name: "+ Новая", exact: true }).click();
   const modal = page.locator(".modal");
   await modal.getByPlaceholder("Название задачи").fill("зарядка");
-  await modal.getByLabel("Повтор").selectOption("Weekdays");
+  await pickOption(page, modal, "Повтор", "По дням недели");
 
   const dayPicker = modal.locator(".day-picker");
   await expect(dayPicker).toBeVisible();
@@ -495,9 +1260,11 @@ test("повтор по дням недели: выбор в модалке со
   await expect(row.locator(".muted[title*='Пн']")).toHaveCount(1);
 
   // Редактирование — чекбоксы восстанавливаются из сохранённой маски
-  await row.locator(".task-main").click();
+  await row.locator(".task-main").dblclick();
   const editModal = page.locator(".modal");
-  await expect(editModal.getByLabel("Повтор")).toHaveValue("Weekdays");
+  // Кнопка, а не <select>: значение читается как текст, а не через toHaveValue.
+  await expect(editModal.getByRole("button", { name: "Повтор", exact: true }))
+    .toContainText("По дням недели");
   const editPicker = editModal.locator(".day-picker");
   await expect(editPicker.locator(".day-chip", { hasText: "Пн" }).locator("input")).toBeChecked();
   await expect(editPicker.locator(".day-chip", { hasText: "Ср" }).locator("input")).toBeChecked();
@@ -514,7 +1281,7 @@ test("модалка задач: повтор без выбранных дней
   await page.getByRole("button", { name: "+ Новая", exact: true }).click();
   const modal = page.locator(".modal");
   await modal.getByPlaceholder("Название задачи").fill("без дней");
-  await modal.getByLabel("Повтор").selectOption("Weekdays");
+  await pickOption(page, modal, "Повтор", "По дням недели");
   await modal.getByRole("button", { name: "Создать" }).click();
   await expect(modal.locator(".alert")).toHaveText("Выберите хотя бы один день недели");
   await modal.getByRole("button", { name: "Отмена" }).click();
@@ -525,12 +1292,12 @@ test("модалка задач: повтор без выбранных дней
   const modal2 = page.locator(".modal");
   await modal2.getByPlaceholder("Название задачи").fill("полив цветов");
   await modal2.locator('input[type="datetime-local"]').fill("2030-01-15T09:00");
-  await modal2.getByLabel("Повтор").selectOption("Daily");
+  await pickOption(page, modal2, "Повтор", "Каждый день");
   await expect(modal2.locator(".hint")).toContainText("не закрывается");
   await modal2.getByRole("button", { name: "Создать" }).click();
 
   const row = page.locator(".task-row", { hasText: "полив цветов" });
-  await row.locator(".task-main").click();
+  await row.locator(".task-main").dblclick();
   const editModal = page.locator(".modal");
   await expect(editModal.locator('input[type="datetime-local"]')).toHaveValue("2030-01-15T09:00");
   await editModal.getByRole("button", { name: "Отмена" }).click();
@@ -547,7 +1314,7 @@ test("корзина: мягкое удаление, восстановлени�
   await createTask(page, "черновик задачи");
   await expect(page.locator(".task-main", { hasText: "черновик задачи" })).toBeVisible();
 
-  await page.locator(".task-row", { hasText: "черновик задачи" }).getByTitle("Удалить").click();
+  await rowMenu(page, "черновик задачи", "Удалить");
   await expect(page.locator(".task-main", { hasText: "черновик задачи" })).toHaveCount(0);
 
   // В корзине, не в истории
@@ -565,7 +1332,7 @@ test("корзина: мягкое удаление, восстановлени�
   await expect(page.locator(".task-main", { hasText: "черновик задачи" })).toBeVisible();
 
   // Удалить снова, затем стереть навсегда
-  await page.locator(".task-row", { hasText: "черновик задачи" }).getByTitle("Удалить").click();
+  await rowMenu(page, "черновик задачи", "Удалить");
   await page.getByRole("button", { name: "Корзина", exact: true }).click();
   await expect(trashPanel.locator(".task-row", { hasText: "черновик задачи" })).toBeVisible();
   await trashPanel.locator(".task-row", { hasText: "черновик задачи" }).getByTitle("Удалить навсегда").click();
@@ -583,7 +1350,7 @@ test("список/история/корзина: один взаимоискл�
   await createTask(page, "выполненная");
   await createTask(page, "удалённая");
   await page.locator(".task-row").filter({ hasText: "выполненная" }).locator(".task-check").click();
-  await page.locator(".task-row").filter({ hasText: "удалённая" }).getByTitle("Удалить").click();
+  await rowMenu(page, "удалённая", "Удалить");
 
   const seg = page.locator(".page-head .seg").nth(1);
 
@@ -634,6 +1401,207 @@ test("история: клик по строке открывает read-only д
 
   await modal.getByRole("button", { name: "Закрыть" }).click();
   await expect(page.locator(".modal")).toHaveCount(0);
+});
+
+// Отметил последнюю подзадачу — задача выполнена. Правило живёт в бэкенде, а не
+// в компоненте чек-листа: подзадачу пишут из модалки, из панели в списке и из
+// быстрого слота, и работать должно везде, а не только там, куда пользователь
+// нажал. Здесь проверяется, что путь из UI действительно доходит до закрытия.
+test("чек-лист: последняя отмеченная подзадача закрывает задачу", async ({ page }) => {
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [{
+      id: "t1", title: "задача с чек-листом", description: "",
+      status: "Todo", priority: "Medium", category: "Work", deadline: null,
+      tags: [], recurrence: null, hidden: false, sort_order: 1,
+      subtasks: [
+        { id: "s1", task_id: "t1", title: "раз", done: false, position: 0 },
+        { id: "s2", task_id: "t1", title: "два", done: false, position: 1 },
+      ],
+      created_at: now, updated_at: now,
+    }],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  // Панель в строке, а не модалка: модалка пишет чек-лист диффом по «Сохранить»,
+  // и до нажатия кнопки в БД ничего не меняется. Панель пишет сразу — здесь и
+  // видно, что отметка сама доводит задачу до конца.
+  await page.waitForSelector(".chip-sub");
+  await page.locator(".chip-sub").first().click();
+  await page.waitForSelector(".task-sub-panel .checklist-editor", { timeout: 5000 })
+    .catch(async () => {
+      await page.locator(".chip-sub").first().click();
+      await page.waitForSelector(".task-sub-panel .checklist-editor");
+    });
+
+  const boxes = page.locator(".task-sub-panel .cm-sub-checkbox");
+
+  // Первая из двух — задача остаётся открытой.
+  await boxes.first().click({ force: true });
+  await expect.poll(() => page.evaluate(() =>
+    JSON.parse(localStorage.getItem("__mock_db")!).tasks[0].subtasks.filter((s: any) => s.done).length
+  )).toBe(1);
+  expect(await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("__mock_db")!).tasks[0].status), "закрылась на первой из двух").toBe("Todo");
+  // Чип показывает прогресс и НЕ зеленеет, пока сделано не всё (v0.8.2). Проверка
+  // переехала сюда из теста жизненного цикла задачи: там она требовала списка из
+  // одной подзадачи, а такой теперь закрывает задачу на первой же галочке.
+  await expect(page.locator(".chip-sub")).toHaveText(/1\/2/);
+  await expect(page.locator(".chip-sub")).not.toHaveClass(/subs-done/);
+
+  // Вторая — закрывает задачу.
+  await page.locator(".task-sub-panel .cm-sub-checkbox:not(:checked)").first().click({ force: true });
+  await expect.poll(() => page.evaluate(() => {
+    const t = JSON.parse(localStorage.getItem("__mock_db")!).tasks[0];
+    return [t.status, t.hidden];
+  })).toEqual(["Done", true]);
+
+  // И это видно на экране: задача ушла из активных в историю.
+  await expect(page.locator(".task-row")).toHaveCount(0);
+});
+
+// Повтор: чек-лист — план следующего прогона, поэтому завершение снимает галочки.
+// Панель держит свой текст отдельно от стора, и без сброса кэша экран продолжал
+// показывать отмеченные квадраты поверх уже очищенной БД — а следующая правка
+// записала бы эти галочки обратно, отменив сброс.
+test("чек-лист повтора: после автозакрытия галочки снимаются и на экране", async ({ page }) => {
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [{
+      id: "t1", title: "ежедневная", description: "",
+      status: "Todo", priority: "Medium", category: "Work", deadline: null,
+      tags: [], recurrence: "Daily", hidden: false, sort_order: 1,
+      subtasks: [
+        { id: "s1", task_id: "t1", title: "раз", done: false, position: 0 },
+        { id: "s2", task_id: "t1", title: "два", done: false, position: 1 },
+      ],
+      created_at: now, updated_at: now,
+    }],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.waitForSelector(".chip-sub");
+  await page.locator(".chip-sub").first().click();
+  await page.waitForSelector(".task-sub-panel .checklist-editor", { timeout: 5000 })
+    .catch(async () => {
+      await page.locator(".chip-sub").first().click();
+      await page.waitForSelector(".task-sub-panel .checklist-editor");
+    });
+
+  await page.locator(".task-sub-panel .cm-sub-checkbox").first().click({ force: true });
+  await expect.poll(() => page.evaluate(() =>
+    JSON.parse(localStorage.getItem("__mock_db")!).tasks[0].subtasks.filter((s: any) => s.done).length
+  )).toBe(1);
+
+  await page.locator(".task-sub-panel .cm-sub-checkbox:not(:checked)").first().click({ force: true });
+
+  // Повтор не уходит в историю, а едет на следующий дедлайн с чистым чек-листом.
+  await expect.poll(() => page.evaluate(() => {
+    const t = JSON.parse(localStorage.getItem("__mock_db")!).tasks[0];
+    return [t.status, t.hidden, t.subtasks.filter((s: any) => s.done).length];
+  })).toEqual(["Todo", false, 0]);
+
+  // И экран это показывает: ни одной отмеченной галочки, счётчик чипа обнулился.
+  await expect(page.locator(".task-sub-panel .cm-sub-checkbox:checked")).toHaveCount(0);
+  await expect(page.locator(".chip-sub")).toHaveText(/0\/2/);
+  await expect(page.locator(".task-row")).toHaveCount(1);
+});
+
+// Отмеченная подзадача зачёркивается и уезжает вниз, как в Xiaomi Notes.
+// Перенос — только по клику по галочке: это один общий текстовый документ, и
+// перестройка на каждую правку уводила бы строку из-под каретки при наборе.
+test("чек-лист: отметка зачёркивает подзадачу и уносит её вниз списка", async ({ page }) => {
+  const now = new Date().toISOString();
+  await seedDb(page, {
+    notes: [],
+    settings: { onboarding_complete: true },
+    tasks: [{
+      id: "t1", title: "задача с чек-листом", description: "",
+      status: "Todo", priority: "Medium", category: "Work", deadline: null,
+      tags: [], recurrence: null, hidden: false, sort_order: 1,
+      subtasks: [
+        { id: "s1", task_id: "t1", title: "первая", done: false, position: 0 },
+        { id: "s2", task_id: "t1", title: "вторая", done: false, position: 1 },
+        { id: "s3", task_id: "t1", title: "третья", done: false, position: 2 },
+      ],
+      created_at: now, updated_at: now,
+    }],
+  });
+  await withMock(page);
+  await page.goto("/");
+  await openTaskCard(page, "задача с чек-листом");
+
+  const lines = page.locator(".modal .cm-line");
+  await expect(lines).toHaveText(["первая", "вторая", "третья"]);
+  await expect(page.locator(".modal .cm-sub-done")).toHaveCount(0);
+
+  // Отмечаем первую — она уходит в конец и зачёркивается.
+  await page.locator(".modal .cm-sub-checkbox").first().click();
+  await expect(lines).toHaveText(["вторая", "третья", "первая"]);
+  const done = page.locator(".modal .cm-sub-done");
+  await expect(done).toHaveCount(1);
+  await expect(done).toHaveText("первая");
+  await expect(done).toHaveCSS("text-decoration-line", "line-through");
+
+  // Отмечена ровно одна галочка, и именно у перенесённой строки. Регресс:
+  // виджет сравнивался по {checked, pos}, и после переноса строка, занявшая
+  // освободившееся смещение, наследовала чужой DOM-узел с уже переключённым
+  // браузером состоянием — на экране оказывались отмечены ОБЕ, при том что
+  // текст и зачёркивание были верными.
+  await expect(page.locator(".modal .cm-sub-checkbox:checked")).toHaveCount(1);
+  const boxes = await page.locator(".modal .cm-line").evaluateAll((ls) =>
+    ls.map(l => ({
+      text: (l as HTMLElement).innerText,
+      checked: (l.querySelector(".cm-sub-checkbox") as HTMLInputElement)?.checked,
+    })));
+  expect(boxes, "галочка не совпадает со своей строкой").toEqual([
+    { text: "вторая", checked: false },
+    { text: "третья", checked: false },
+    { text: "первая", checked: true },
+  ]);
+
+  // Фигура рисуется в SVG, а не средствами родного чекбокса: скобки `[ ]` из
+  // границ коробки не собрать. Родной <input> остаётся ради семантики, но
+  // спрятан прозрачностью — не display:none, иначе он выпал бы из дерева
+  // доступности и состояние перестало бы читаться скринридером.
+  const shape = page.locator(".modal .cm-sub-box").first();
+  await expect(shape.locator(".cm-sub-bracket")).toHaveCount(2);
+  await expect(shape.locator(".cm-sub-tick")).toHaveCount(1);
+  await expect(page.locator(".modal .cm-sub-checkbox").first()).toHaveCSS("opacity", "0");
+
+  // Птичка прорисовывается, а не появляется разом. Анимация, а не переход:
+  // каждое переключение переписывает весь документ, CodeMirror пересоздаёт
+  // виджет, и новый узел приходит уже отмеченным — переходу не от чего идти
+  // (замерено: узел до и после клика — разные объекты, промежуточных кадров нет).
+  const drawn = await page.locator(".modal .cm-sub-checkbox:checked ~ .cm-sub-svg .cm-sub-tick")
+    .evaluate((t) => {
+      const anim = (t as SVGElement).getAnimations()[0];
+      if (!anim) return null;
+      const at = (ms: number) => {
+        anim.currentTime = ms;
+        return parseFloat(getComputedStyle(t as SVGElement).strokeDashoffset);
+      };
+      return { start: at(0), mid: at(110), end: at(220) };
+    });
+  expect(drawn, "у птички нет анимации прорисовки").not.toBeNull();
+  expect(drawn!.start).toBeGreaterThan(0);
+  expect(drawn!.end).toBeCloseTo(0, 1);
+  // Середина строго между концами — то есть линия действительно едет, а не
+  // прыгает из скрытого состояния в видимое.
+  expect(drawn!.mid).toBeGreaterThan(drawn!.end);
+  expect(drawn!.mid).toBeLessThan(drawn!.start);
+
+  // Снятие галочки НЕ тащит строку обратно: порядок после этого — дело рук
+  // пользователя, и дёргать список во второй раз незачем.
+  await page.locator(".modal .cm-sub-checkbox").last().click();
+  await expect(lines).toHaveText(["вторая", "третья", "первая"]);
+  await expect(page.locator(".modal .cm-sub-done")).toHaveCount(0);
 });
 
 test("модалка: чек-лист подзадач — разметка скрыта чекбоксом, Enter продолжает список, сохранение применяет diff", async ({ page }) => {
@@ -687,7 +1655,7 @@ test("модалка: чек-лист подзадач — разметка ск
   expect(before.map((s: string[]) => s[1])).toEqual(["паспорт", "билеты"]);
 
   // редактирование: правка формулировки + удаление строки
-  await page.locator(".task-main", { hasText: "поездка" }).click();
+  await page.locator(".task-main", { hasText: "поездка" }).dblclick();
   await expect(editor).toHaveText("паспортбилеты"); // две строки без разметки
   await editor.click();
   await page.keyboard.press("ControlOrMeta+a");
@@ -900,6 +1868,8 @@ test("онбординг: последний шаг ведёт в Настрой
   await withMock(page);
   await page.goto("/");
 
+  // v0.10.14: первым идёт выбор языка.
+  await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Начать настройку" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
@@ -917,6 +1887,8 @@ test("онбординг: шаг голосового ввода пропуск�
   await withMock(page);
   await page.goto("/");
 
+  // v0.10.14: первым идёт выбор языка.
+  await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Начать настройку" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
@@ -944,13 +1916,13 @@ test("настройки: раздел голосового ввода есть 
 
   await expect(page.getByText("Голосовой ввод")).toBeVisible();
   // путь и каталог — whisper'овские, а не от чат-модели
-  await expect(page.getByText("/home/user/.local/share/com.ainotes.app/models/whisper.bin")).toBeVisible();
+  await expect(page.getByText("/home/user/.local/share/com.kriptag.app/models/whisper.bin")).toBeVisible();
   await expect(page.getByText("Whisper Base")).toBeVisible();
 });
 
 // v0.9.28: путь к модели приходит от бэкенда (app_data_dir зависит от ОС),
 // а не собирается строкой в UI. Раньше был зашит
-// `~/.local/share/ai-notes/models/model.gguf` — неверный на Windows/macOS и
+// `~/.local/share/kriptag/models/model.gguf` — неверный на Windows/macOS и
 // неверный даже на Linux (каталог называется по identifier'у приложения).
 test("настройки: путь к локальной модели берётся из бэкенда, а не зашит в UI", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
@@ -960,9 +1932,9 @@ test("настройки: путь к локальной модели берёт
   await page.getByRole("button", { name: "Настройки" }).click();
   // exact: «ИИ» подстрокой матчит и «Уведомления» — strict mode violation
   await page.locator(".settings-tab").getByText("ИИ", { exact: true }).click();
-  await expect(page.getByText("/home/user/.local/share/com.ainotes.app/models/model.gguf")).toBeVisible();
+  await expect(page.getByText("/home/user/.local/share/com.kriptag.app/models/model.gguf")).toBeVisible();
   // старая зашитая строка не должна остаться нигде
-  await expect(page.getByText("~/.local/share/ai-notes/models")).toHaveCount(0);
+  await expect(page.getByText("~/.local/share/kriptag/models")).toHaveCount(0);
 });
 
 // v0.9.28: совет про композитор специфичен для Wayland — на Windows его быть
@@ -973,13 +1945,17 @@ test("онбординг: совет про Hyprland/Sway показываетс
   await page.goto("/"); // мок отдаёт is_wayland: false — шаг Wayland пропускается
 
   // проходим до шага автозагрузки (шаг Wayland пропущен — is_wayland: false)
+  await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Начать настройку" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
   await expect(page.getByText("Автозагрузка и хоткеи")).toBeVisible();
 
-  // не-Wayland: совета про композитор нет, сам хоткей упомянут
-  await expect(page.getByText("Hyprland/Sway")).toHaveCount(0);
-  await expect(page.getByText("Быстрая задача из любого места")).toBeVisible();
+  // не-Wayland: ни отсылки к композитору, ни отдельного шага с конфигом —
+  // хоткеи там регистрирует само приложение (v0.10.14).
+  await expect(page.getByText("композитор")).toHaveCount(0);
+  await expect(page.getByText("Быстрый ввод из любого места")).toBeVisible();
+  await page.getByRole("button", { name: "Далее" }).click();
+  await expect(page.getByText("Хоткеи в композиторе"), "шаг биндов показан не на Wayland").toHaveCount(0);
 });
 
 // v0.9.27: кнопки на панели форматирования для тех же трёх конструкций.
@@ -1144,8 +2120,11 @@ test("ИИ-автолинковка: кнопка скрыта без ИИ, с �
   await page.keyboard.type("текст без ссылок");
   await page.waitForTimeout(900);
 
-  // без ИИ кнопки нет вовсе
-  await expect(page.getByTitle("ИИ предложит заметки для связи")).toHaveCount(0);
+  // без ИИ пункта нет вовсе — проверяем внутри меню, куда действие переехало
+  await page.getByRole("button", { name: "Действия с заметкой" }).click();
+  await expect(page.locator('[role="menuitem"]', { hasText: "ИИ предложит заметки" }))
+    .toHaveCount(0);
+  await page.keyboard.press("Escape");
 
   // включаем ИИ (in-place, сохраняя уже созданные заметки) и перезаходим,
   // чтобы капабилити-детект перечитал настройки
@@ -1158,9 +2137,7 @@ test("ИИ-автолинковка: кнопка скрыта без ИИ, с �
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
   await page.locator(".note-item", { hasText: "Главная" }).click();
 
-  const suggestBtn = page.getByTitle("ИИ предложит заметки для связи");
-  await expect(suggestBtn).toBeVisible();
-  await suggestBtn.click();
+  await noteAction(page, "ИИ предложит заметки для связи");
 
   const chip = page.locator(".link-chip", { hasText: "Соседняя" });
   await expect(chip).toBeVisible();
@@ -1304,7 +2281,7 @@ test("проекты: создание, назначение задаче, гр�
   // задача в проект через модал
   await page.getByRole("button", { name: "+ Новая", exact: true }).click();
   await page.getByPlaceholder("Название задачи").fill("покрасить стены");
-  await page.getByLabel("Проект").selectOption({ label: "Ремонт" });
+  await pickOption(page, page, "Проект", "Ремонт");
   await page.getByRole("button", { name: "Создать" }).click();
   await createTask(page, "задача вне проекта");
 
@@ -1336,7 +2313,7 @@ test("цель проекта: прогресс в заголовке групп
   // задача в проекте → в заголовке группы виден прогресс цели
   await page.getByRole("button", { name: "+ Новая", exact: true }).click();
   await page.getByPlaceholder("Название задачи").fill("пробежка");
-  await page.getByLabel("Проект").selectOption({ label: "Спорт" });
+  await pickOption(page, page, "Проект", "Спорт");
   await page.getByRole("button", { name: "Создать" }).click();
   const headChip = page.locator(".project-head .goal-chip");
   await expect(headChip).toHaveText("0/1 задач");
@@ -1370,20 +2347,21 @@ test("язык: переключение меняет интерфейс сра�
   await expect(page.locator(".nav-item span", { hasText: "Задачи" })).toBeVisible();
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // Применяется сразу, без «Сохранить» — как и тема
   await expect(page.locator(".nav-item span", { hasText: "Tasks" })).toBeVisible();
   await expect(page.locator(".nav-item span", { hasText: "Задачи" })).toHaveCount(0);
 
-  // После сохранения переживает перезагрузку
-  await page.getByRole("button", { name: /Сохранить|Save/ }).first().click();
+  // Автосохранение переживает перезагрузку. Индикатор на английском — язык уже
+  // переключён этим же тестом.
+  await expect(page.locator(".autosave-note")).toContainText(/Сохранено|Saved/, { timeout: 5000 });
   await page.reload();
   await expect(page.locator(".nav-item span", { hasText: "Tasks" })).toBeVisible();
 
   // и обратно
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.locator("label", { hasText: "Language" }).locator("select").selectOption("ru");
+  await pickSetting(page, "Language", "Русский");
   await expect(page.locator(".nav-item span", { hasText: "Задачи" })).toBeVisible();
 });
 
@@ -1393,7 +2371,7 @@ test("язык: строки без перевода остаются русск
   await withMock(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // «Внешний вид» переведён, а заголовки секций ниже — ещё нет; они должны
   // остаться читаемыми русскими, а не превратиться в пустые блоки.
@@ -1428,8 +2406,9 @@ test("домены: выключены по умолчанию, галочка �
   // Явно сказано, что заголовок не сохраняется — формулировка часть фичи
   await expect(page.getByText(/только домен/i)).toBeVisible();
 
-  await cb.check();
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await flipSwitch(page, "Разбивать браузерное время");
+  await expect(cb).toBeChecked();
+  await waitSettingsSaved(page);
   await page.reload();
   await page.getByRole("button", { name: "Настройки" }).click();
   await page.locator(".settings-tab", { hasText: "Категории" }).click();
@@ -1646,6 +2625,147 @@ test("дашборд: годовой календарь — квадрат се�
   await expect(page.locator(".cal-tip")).toContainText("сделанное дело");
 });
 
+// Без подписей по краям сетка года не читалась: квадрат есть, а какой это день
+// и месяц — непонятно. Подписи дней стоят в отдельной колонке-жёлобе слева, и
+// проверять надо именно то, что жёлоб не сдвинул сетку: месяцы должны остаться
+// над своими квадратами, а сами квадраты — не заезжать в колонку с подписями.
+// Сетка дашборда двухколоночная, а часть панелей условная (цели, время по
+// проектам, приложения, сайты). При нечётном числе узких панелей последняя
+// оставалась одна в левой колонке, и справа зияла дыра до следующей широкой
+// панели — ровно это было видно на скриншоте под «Резюме».
+test("дашборд: последняя узкая панель не оставляет дыру справа", async ({ page }) => {
+  const now = new Date().toISOString();
+  // Только выполненные задачи: условные панели (проекты, приложения) не
+  // отрисуются, и «Резюме» окажется последней узкой — тот самый случай.
+  const tasks = Array.from({ length: 6 }, (_, i) => ({
+    id: `t${i}`, title: `t${i}`, status: "Done", priority: "Medium",
+    category: "Work", tags: [], hidden: true, subtasks: [],
+    created_at: now, updated_at: now, completed_at: now,
+  }));
+  await seedDb(page, { notes: [], tasks, settings: { onboarding_complete: true } });
+  await withMock(page);
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Дашборд" }).click();
+  await page.locator(".grid .panel").first().waitFor();
+
+  const holes = await page.evaluate(() => {
+    const grid = document.querySelector(".grid") as HTMLElement;
+    const gw = grid.getBoundingClientRect().width;
+    const panels = [...grid.children] as HTMLElement[];
+    const out: string[] = [];
+    for (let i = 0; i < panels.length; i++) {
+      const p = panels[i];
+      const next = panels[i + 1];
+      const r = p.getBoundingClientRect();
+      const half = r.width < gw * 0.9;
+      // Узкая панель, за которой идёт широкая (или ничего), обязана растянуться:
+      // делить строку ей не с кем.
+      const alone = half && (!next || next.classList.contains("wide"));
+      if (alone) out.push(p.querySelector(".section-title")?.textContent?.trim() ?? "?");
+    }
+    return out;
+  });
+
+  expect(holes, "узкая панель осталась одна в строке — справа пустое место").toEqual([]);
+});
+
+test("дашборд: у года есть подписи дней и месяцев, сетка не съезжает", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await createTask(page, "сделанное дело");
+  await page.locator(".task-check").click();
+  await page.getByRole("button", { name: "Дашборд" }).click();
+  await page.locator(".cal-grid").waitFor();
+
+  // Названы через день: на мелкой клетке семь подписей подряд сливаются.
+  // Пустые всё равно отрисованы, иначе подписи разъехались бы по чужим строкам.
+  await expect(page.locator(".cal-wd")).toHaveCount(7);
+  await expect(page.locator(".cal-wd").filter({ hasText: /\S/ })).toHaveCount(4);
+  await expect(page.locator(".cal-wd").first()).toHaveText("Пн");
+
+  const geom = await page.evaluate(() => {
+    const wds = [...document.querySelectorAll(".cal-wd")] as HTMLElement[];
+    const cells = [...document.querySelectorAll(".cal-cell")] as HTMLElement[];
+    const months = [...document.querySelectorAll(".cal-month")] as HTMLElement[];
+    const gutterRight = wds[0].getBoundingClientRect().right;
+    return {
+      // Автопоток колонками должен начать квадраты со ВТОРОЙ колонки: подписи
+      // занимают все семь строк первой. Иначе первая неделя легла бы в жёлоб.
+      squaresInGutter: cells.filter(c => c.getBoundingClientRect().left < gutterRight - 0.5).length,
+      // Подпись месяца ровно над первым числом СВОЕГО месяца. Сравнивать надо
+      // именно с этим квадратом: колонки одинаковой ширины, поэтому сдвинутая
+      // на одну подпись всё равно попадёт над каким-нибудь квадратом, и
+      // проверка «есть хоть один» прошла бы на сломанной вёрстке.
+      monthsAligned: months.every(m => {
+        const first = cells.find(c => {
+          const d = c.getAttribute("data-date");
+          return !!d && d.endsWith("-01") &&
+            new Date(d + "T00:00:00").toLocaleDateString("ru-RU", { month: "short" }).startsWith(
+              (m.textContent ?? "").slice(0, 3));
+        });
+        return !!first &&
+          Math.abs(first.getBoundingClientRect().x - m.getBoundingClientRect().x) < 1.5;
+      }),
+      monthCount: months.length,
+    };
+  });
+
+  expect(geom.squaresInGutter, "квадраты заехали в колонку подписей").toBe(0);
+  expect(geom.monthsAligned, "подпись месяца не над своим квадратом").toBe(true);
+  expect(geom.monthCount).toBeGreaterThan(0);
+});
+
+// Наведение на месяц обводит все его квадраты. Главное здесь — что подсветка
+// совпадает с месяцем день в день: сетка сложена колонками-неделями, а неделя
+// заходит в соседний месяц с обоих концов, поэтому любая подсветка «по колонкам»
+// захватила бы чужие дни. Проверяем именно границы, а не факт подсветки.
+test("дашборд: наведение на месяц обводит ровно его дни", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await createTask(page, "сделанное дело");
+  await page.locator(".task-check").click();
+  await page.getByRole("button", { name: "Дашборд" }).click();
+  await page.locator(".cal-grid").waitFor();
+
+  // Второй ярлык, а не первый: первый месяц года обрезан началом диапазона,
+  // и на нём проверка границ ничего бы не доказала.
+  const label = page.locator(".cal-month").nth(1);
+  await label.hover();
+
+  const lit = page.locator(".cal-cell.on");
+  await expect(lit.first()).toBeVisible();
+
+  const bounds = await page.evaluate(() => {
+    const on = [...document.querySelectorAll(".cal-cell.on")] as HTMLElement[];
+    const dates = on.map(c => c.dataset.date!).sort();
+    const months = new Set(on.map(c => c.dataset.month));
+    const first = dates[0], last = dates[dates.length - 1];
+    const daysInMonth = new Date(
+      Number(first.slice(0, 4)), Number(first.slice(5, 7)), 0).getDate();
+    return { months: [...months], first, last, count: on.length, daysInMonth };
+  });
+
+  // Ровно один месяц — ни одного дня из соседних.
+  expect(bounds.months.length, "подсветка залезла в соседний месяц").toBe(1);
+  // От первого до последнего числа, и столько квадратов, сколько дней в месяце.
+  expect(bounds.first.endsWith("-01"), `подсветка начинается не с 1-го: ${bounds.first}`).toBe(true);
+  expect(bounds.last.slice(8)).toBe(String(bounds.daysInMonth).padStart(2, "0"));
+  expect(bounds.count).toBe(bounds.daysInMonth);
+
+  // Наводить можно и на сам квадрат: ярлык узкий, а квадратов у месяца три десятка.
+  await page.mouse.move(0, 0);
+  await expect(page.locator(".cal-cell.on")).toHaveCount(0);
+  const someCell = page.locator(".cal-cell[data-date]").nth(200);
+  const key = await someCell.getAttribute("data-month");
+  await someCell.hover();
+  const viaCell = await page.evaluate(() =>
+    [...new Set([...document.querySelectorAll(".cal-cell.on")].map(c => (c as HTMLElement).dataset.month))]);
+  expect(viaCell).toEqual([key]);
+});
+
 test("дашборд: клик по дню открывает попап, клик по задаче ведёт в раздел Задач", async ({ page }) => {
   await withMock(page);
   await page.goto("/");
@@ -1720,9 +2840,11 @@ test("категории: создание в настройках, назнач
   await page.getByRole("button", { name: "Задачи" }).click();
   await page.getByRole("button", { name: "+ Новая", exact: true }).click();
   await page.getByPlaceholder("Название задачи").fill("пробежка");
-  await page.getByLabel("Категория").selectOption({ label: "Спорт" });
+  await pickOption(page, page, "Категория", "Спорт");
   await page.getByRole("button", { name: "Создать" }).click();
-  await expect(page.locator(".chip-cat", { hasText: "Спорт" })).toBeVisible();
+  // .task-meta, а не просто .chip-cat: с v0.9.99 такой же чип есть в ряду
+  // фильтра по категориям, и без привязки к строке локатор находит оба.
+  await expect(page.locator(".task-meta .chip-cat", { hasText: "Спорт" })).toBeVisible();
 
   // удалить категорию — задача переезжает в «Другое»
   await page.getByRole("button", { name: "Настройки" }).click();
@@ -1733,7 +2855,7 @@ test("категории: создание в настройках, назнач
   await expect(catSection.locator(".rule-row")).toHaveCount(6);
 
   await page.getByRole("button", { name: "Задачи" }).click();
-  await expect(page.locator(".chip-cat", { hasText: "Другое" })).toBeVisible();
+  await expect(page.locator(".task-meta .chip-cat", { hasText: "Другое" })).toBeVisible();
 });
 
 test("лимиты категорий приложений: поле сохраняется и переживает перезагрузку", async ({ page }) => {
@@ -1757,7 +2879,7 @@ test("лимиты категорий приложений: поле сохра�
 
   const otherRow = page.locator(".limit-row", { hasText: "Другое" });
   await otherRow.locator("input[type=number]").fill("45");
-  await page.getByRole("button", { name: "Сохранить" }).click();
+  await waitSettingsSaved(page);
 
   await page.reload();
   await page.getByRole("button", { name: "Настройки" }).click();
@@ -1787,7 +2909,7 @@ test("версии заметок: панель показывает истор�
   await page.locator(".note-item", { hasText: "заметка с историей" }).click();
   await expect(noteEditor(page)).toContainText("новый текст");
 
-  await page.getByTitle("Версии заметки").click();
+  await noteAction(page, "Версии заметки");
   await expect(page.getByText("Версии заметки")).toBeVisible();
   await expect(page.locator(".revision-item")).toHaveCount(1);
 
@@ -1911,7 +3033,7 @@ test("корзина заметок: удалённая восстанавлив
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
 
   await page.locator(".note-item", { hasText: "Черновик" }).click();
-  await page.getByTitle("Удалить заметку").click();
+  await noteAction(page, "Удалить заметку");
   await expect(page.locator(".note-row", { hasText: "Черновик" })).toHaveCount(0);
 
   // В Корзине — с сохранённым содержимым
@@ -1946,7 +3068,7 @@ test("корзина заметок: удалённая не находится 
   await page.goto("/");
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
   await page.locator(".note-item", { hasText: "уникальноеслово" }).click();
-  await page.getByTitle("Удалить заметку").click();
+  await noteAction(page, "Удалить заметку");
 
   await page.keyboard.press("ControlOrMeta+KeyK");
   await page.locator(".overlay input").first().fill("уникальноеслово");
@@ -2412,9 +3534,7 @@ test("ИИ: резюме заметки — кнопка открывает ок
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
   await page.locator(".note-item", { hasText: "Длинная заметка" }).click();
 
-  const summarizeBtn = page.getByTitle("ИИ: резюме заметки");
-  await expect(summarizeBtn).toBeVisible();
-  await summarizeBtn.click();
+  await noteAction(page, "ИИ: резюме заметки");
 
   const summaryText = page.locator(".summary-text");
   await expect(summaryText).toBeVisible();
@@ -2448,9 +3568,7 @@ test("ИИ: извлечение задач из заметки — список
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
   await page.locator(".note-item", { hasText: "Заметка с делами" }).click();
 
-  const extractBtn = page.getByTitle("ИИ: извлечь задачи из заметки");
-  await expect(extractBtn).toBeVisible();
-  await extractBtn.click();
+  await noteAction(page, "ИИ: извлечь задачи из заметки");
 
   // v0.9.44: список строк с галочками вместо ряда чипов
   const rows = page.locator(".extracted-row");
@@ -2501,7 +3619,7 @@ test("экспорт заметки в HTML: кнопка сохраняет с�
 
   await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
   await page.locator(".note-item", { hasText: "Заметка для экспорта" }).click();
-  await page.getByTitle("Экспорт в HTML").click();
+  await noteAction(page, "Экспорт в HTML");
 
   await expect.poll(async () => {
     const raw = await page.evaluate(() => localStorage.getItem("__mock_db"));
@@ -2565,7 +3683,7 @@ test("шаблоны чеклистов: сохранить подзадачи �
 
   // Применяем шаблон к «другой задаче»
   const otherRow = page.locator(".task-row", { hasText: "другая задача" });
-  await otherRow.locator(".task-main").click();
+  await otherRow.locator(".task-main").dblclick();
   const otherModal = page.locator(".modal");
   await otherModal.getByRole("button", { name: "Из шаблона…" }).click();
   // Имя шаблона именно в списке шаблонов: с v0.9.56 в модалке есть ещё и
@@ -2584,10 +3702,12 @@ test("тёмная тема применяется и переживает пе�
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.getByLabel("Тёмная").check();
+  // Тема переключается сегментами (.seg), а не радиокнопками: родные радио в
+  // WebKitGTK рисуются системной темой GTK мимо токенов.
+  await page.getByRole("radio", { name: "Тёмная" }).click();
   await expect(page.locator("html")).toHaveClass(/dark/);
 
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/dark/);
 });
@@ -2597,20 +3717,289 @@ test("пресет цветов: задаёт основной и дополни
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.getByRole("button", { name: "Закат" }).click();
+  await choosePreset(page, "Nord");
 
   const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim());
   const secondary = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent-secondary").trim());
-  expect(accent).toBe("#f43f5e");
-  expect(secondary).toBe("#f59e0b");
+  expect(accent).toBe("#88c0d0");
+  expect(secondary).toBe("#b48ead");
 
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
   await page.reload();
 
   const accentAfter = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim());
   const secondaryAfter = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent-secondary").trim());
-  expect(accentAfter).toBe("#f43f5e");
-  expect(secondaryAfter).toBe("#f59e0b");
+  expect(accentAfter).toBe("#88c0d0");
+  expect(secondaryAfter).toBe("#b48ead");
+});
+
+test("настройки: сохраняются сами, кнопки «Сохранить» нет", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Кнопки формы нет — есть расписка о том, что запись идёт сама.
+  await expect(page.locator(".settings > .btn-primary")).toHaveCount(0);
+  await expect(page.locator(".autosave-note")).toContainText("сохраняются сами");
+
+  // Дискретный выбор пишется без ожидания следующего нажатия.
+  await choosePreset(page, "Nord");
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()
+  )).toBe("#88c0d0");
+});
+
+test("настройки: правка в поле сохраняется без клика по кнопке", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Ввод с клавиатуры — путь с дебаунсом, в отличие от выбора пресета.
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+  await page.locator("input[type=time]").first().fill("07:30");
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+  await expect(page.locator("input[type=time]").first()).toHaveValue("07:30");
+});
+
+test("пресеты: выпадающий список открывается, показывает выбранное и закрывается", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  const trigger = page.locator(".preset-trigger");
+  const list = page.locator(".preset-list");
+
+  // Пока ничего не выбрано — цвета свои, а не пресетные.
+  await expect(trigger).toContainText("Свои цвета");
+  await expect(list).toHaveCount(0);
+
+  await trigger.click();
+  await expect(list).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  // Все 17 пресетов в списке, а не только влезшие в строку.
+  await expect(page.locator(".preset-option")).toHaveCount(17);
+
+  await page.locator(".preset-option", { hasText: "Nord" }).click();
+  // Выбор закрывает список и подставляется в кнопку.
+  await expect(list).toHaveCount(0);
+  await expect(trigger).toContainText("Nord");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+  // Ручная правка акцента снимает имя пресета: подпись отражает состояние, а не
+  // запомненный клик.
+  const advanced = page.locator("label.check", { hasText: "Акцент" }).first();
+  await advanced.locator("input.color-input").evaluate((el: HTMLInputElement) => {
+    el.value = "#123456";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(trigger).toContainText("Свои цвета");
+});
+
+test("пресеты: наведение показывает тему целиком и отпускает её при уходе", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  const varOf = (name: string) =>
+    page.evaluate((n) => document.documentElement.style.getPropertyValue(n).trim(), name);
+
+  await page.locator(".preset-trigger").first().click();
+  const ember = page.locator(".preset-option", { hasText: "Ember" });
+
+  await ember.hover();
+  // Превью показывает не свотч, а настоящую тему: подложку и всё выведенное.
+  expect(await varOf("--bg-primary")).toBe("#0d1117");
+  expect(await varOf("--bg-card")).not.toBe("");
+  expect(await varOf("--accent")).toBe("#ff6b35");
+
+  // Уход мышью со списка возвращает прежнее состояние.
+  await page.locator(".section-title", { hasText: "Внешний вид" }).hover();
+  expect(await varOf("--bg-primary")).toBe("");
+  expect(await varOf("--accent")).toBe("");
+});
+
+test("пресеты: увиденное в превью не сохраняется без клика", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  await page.locator(".preset-trigger").first().click();
+  await page.locator(".preset-option", { hasText: "Gruvbox" }).hover();
+  await page.keyboard.press("Escape");
+
+  // Escape — один из трёх путей выхода; все обязаны снять превью.
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-primary").trim()
+  )).toBe("");
+
+  await waitSettingsSaved(page);
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  // В базу просмотренный пресет не попал.
+  await expect(page.locator(".preset-trigger").first()).toContainText("Свои цвета");
+});
+
+test("пресеты: список закрывается по Escape и ходит стрелками", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  const trigger = page.locator(".preset-trigger");
+  await trigger.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".preset-list")).toBeVisible();
+  // Фокус ушёл на первый пункт, а не остался на кнопке.
+  await expect(page.locator(".preset-option").first()).toBeFocused();
+
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".preset-option").nth(1)).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".preset-list")).toHaveCount(0);
+});
+
+test("пресет Ember: приносит свой фон, поверхности выводятся из него", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Остальные пресеты меняют только акценты; этот несёт собственную подложку,
+  // а карточки, границы и подписи обязаны пойти за ней.
+  await choosePreset(page, "Ember");
+
+  const vars = await page.evaluate(() => {
+    const s = getComputedStyle(document.documentElement);
+    const get = (n: string) => s.getPropertyValue(n).trim();
+    return {
+      accent: get("--accent"),
+      secondary: get("--accent-secondary"),
+      bg: get("--bg-primary"),
+      card: get("--bg-card"),
+      border: get("--border"),
+      textSecondary: get("--text-secondary"),
+    };
+  });
+
+  expect(vars.accent).toBe("#ff6b35");
+  expect(vars.secondary).toBe("#ff9f1c");
+  expect(vars.bg).toBe("#0d1117");
+  // Выведенные: не пустые, не равны подложке и светлее её — фон почти чёрный.
+  for (const name of ["card", "border"] as const) {
+    expect(vars[name], name).toMatch(/^#[0-9a-f]{6}$/);
+    expect(vars[name], name).not.toBe(vars.bg);
+  }
+  // Текст подписей на почти чёрном обязан быть светлым.
+  expect(vars.textSecondary).toBe("#a0a0a0");
+});
+
+test("переключение темы снимает фон, оставшийся от пресета", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Ember приносит почти чёрную подложку. Выведенные цвета пишутся inline на
+  // <html> и бьют любой класс — без сброса светлая тема осталась бы тёмной, и
+  // выхода из этого состояния в интерфейсе не было бы.
+  await choosePreset(page, "Ember");
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-primary").trim()
+  )).toBe("#0d1117");
+
+  await page.getByRole("radio", { name: "Светлая" }).check();
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-primary").trim()
+  )).toBe("");
+  // Акценты — выбор про приложение, а не про режим: они остаются.
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--accent").trim()
+  )).toBe("#ff6b35");
+});
+
+test("кнопка «Вернуть фон темы» появляется только при заданном фоне и снимает его", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  const restore = page.getByRole("button", { name: "Вернуть фон темы" });
+  await expect(restore).toHaveCount(0);
+
+  await choosePreset(page, "Ember");
+  await expect(restore).toBeVisible();
+
+  await restore.click();
+  await expect(restore).toHaveCount(0);
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-card").trim()
+  )).toBe("");
+});
+
+test("светлый пресет уводит приложение из тёмной темы, тёмный — обратно", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Производная модель покрывает только то, что считается из фона. Класс `dark`
+  // продолжает править остальным — цветами категорий, чипом тега, --danger, —
+  // поэтому светлый пресет под `.dark` красил бы их для чужой подложки.
+  await choosePreset(page, "Solarized");
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  await expect(page.getByRole("radio", { name: "Светлая" })).toBeChecked();
+
+  await choosePreset(page, "Dracula");
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(page.getByRole("radio", { name: "Тёмная" })).toBeChecked();
+});
+
+test("текст на заливке акцента следует за акцентом, а не прибит к белому", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Gruvbox: жёлтый акцент, на котором белый текст даёт 1.70.
+  await choosePreset(page, "Gruvbox");
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--on-accent").trim()
+  )).toBe("#141414");
+
+  // Solarized: тёмно-синий, здесь выигрывает белый.
+  await choosePreset(page, "Solarized");
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--on-accent").trim()
+  )).toBe("#ffffff");
+});
+
+test("пресет со своим фоном сбрасывает ручные переопределения поверхностей", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Сначала руками задаём «Второй план» — он переопределяет выведенное.
+  const advanced = page.locator("details.advanced-colors");
+  await advanced.locator("summary").click();
+  await advanced.locator("label.check", { hasText: "Второй план" })
+    .locator("input.color-input")
+    .evaluate((el: HTMLInputElement) => {
+      el.value = "#00ff00";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-secondary").trim()
+  )).toBe("#00ff00");
+
+  // Пресет с собственной подложкой обязан его снять: иначе ярко-зелёная панель
+  // осталась бы поверх новой темы.
+  await choosePreset(page, "Ember");
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-secondary").trim()
+  )).not.toBe("#00ff00");
 });
 
 test("настройки: ИИ-провайдер — выпадающий список переключает поля, сохранение работает", async ({ page }) => {
@@ -2619,27 +4008,30 @@ test("настройки: ИИ-провайдер — выпадающий сп�
 
   await page.getByRole("button", { name: "Настройки" }).click();
   await page.getByRole("tab", { name: "ИИ", exact: true }).click();
-  const providerSelect = page.locator("section", { hasText: "ИИ-провайдер" }).locator("select").first();
+  // Свой Select вместо родного: выбираем по видимой подписи, а не по value.
+  const pickProvider = (label: string) => pickSetting(page, "Провайдер", label);
 
   await expect(page.getByPlaceholder("sk-...")).toHaveCount(0);
   await expect(page.getByPlaceholder("sk-ant-...")).toHaveCount(0);
 
-  await providerSelect.selectOption("openai");
+  await pickProvider("OpenAI");
   await expect(page.getByPlaceholder("sk-...")).toBeVisible();
   await expect(page.getByPlaceholder("sk-ant-...")).toHaveCount(0);
   await page.getByPlaceholder("sk-...").fill("sk-test-openai");
 
-  await providerSelect.selectOption("anthropic");
+  await pickProvider("Anthropic");
   await expect(page.getByPlaceholder("sk-ant-...")).toBeVisible();
   await expect(page.getByPlaceholder("sk-...")).toHaveCount(0);
   await page.getByPlaceholder("sk-ant-...").fill("sk-ant-test");
 
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
   await page.reload();
   await page.getByRole("button", { name: "Настройки" }).click();
   await page.getByRole("tab", { name: "ИИ", exact: true }).click();
 
-  await expect(providerSelect).toHaveValue("anthropic");
+  // Кнопка показывает выбранное подписью, а не value — toHaveValue тут неприменим.
+  await expect(page.locator("label", { hasText: "Провайдер" })
+    .locator("button[aria-haspopup=listbox]")).toContainText("Anthropic");
   await expect(page.getByPlaceholder("sk-ant-...")).toHaveValue("sk-ant-test");
 });
 
@@ -2695,35 +4087,43 @@ test("настройки: хоткеи — переназначение прим
   const hotkeysSection = page.locator("section", { hasText: "Хоткеи" });
   const settingsRow = hotkeysSection.locator(".keybind-row", { hasText: "Перейти: Настройки" });
 
-  await expect(settingsRow.locator(".keybind-combo")).toHaveText("Ctrl+5");
+  // Комбинация берётся из реестра, а не вписана литералом: тест про механику
+  // переназначения, а не про то, какая цифра досталась Настройкам. С литералом
+  // он падал при любой перенумерации разделов (v0.10.11 — Ctrl+5 -> Ctrl+6).
+  const settingsDefault = formatCombo(
+    KEYBIND_ACTIONS.find(a => a.id === "view_settings")!.defaultCombo,
+  );
+  const settingsDefaultKey = settingsDefault.replace("Ctrl+", "");
+
+  await expect(settingsRow.locator(".keybind-combo")).toHaveText(settingsDefault);
 
   await settingsRow.locator(".keybind-combo").click();
   await page.keyboard.press("Control+9");
   await expect(settingsRow.locator(".keybind-combo")).toHaveText("Ctrl+9");
 
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
 
-  // Без перезагрузки: старая комбинация Ctrl+5 больше не переключает на
+  // Без перезагрузки: старая комбинация больше не переключает на
   // Настройки, новая Ctrl+9 работает сразу (App.svelte подхватывает
   // сохранённые хоткеи по событию keybinds-saved, не только при onMount).
   await page.getByRole("button", { name: "Задачи" }).click();
-  await page.keyboard.press("Control+5");
+  await page.keyboard.press(`Control+${settingsDefaultKey}`);
   await expect(page.getByRole("heading", { name: "Настройки" })).toHaveCount(0);
 
   await page.keyboard.press("Control+9");
   await expect(page.getByRole("heading", { name: "Настройки" })).toBeVisible();
   await page.locator(".settings-tab", { hasText: "Хоткеи" }).click();
 
-  // Сброс к дефолту возвращает Ctrl+5 — тоже без reload
+  // Сброс к дефолту возвращает исходную комбинацию — тоже без reload
   const settingsRowAfter = page.locator("section", { hasText: "Хоткеи" }).locator(".keybind-row", { hasText: "Перейти: Настройки" });
   await settingsRowAfter.getByTitle("Сбросить к дефолту").click();
-  await expect(settingsRowAfter.locator(".keybind-combo")).toHaveText("Ctrl+5");
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await expect(settingsRowAfter.locator(".keybind-combo")).toHaveText(settingsDefault);
+  await waitSettingsSaved(page);
 
   await page.getByRole("button", { name: "Задачи" }).click();
   await page.keyboard.press("Control+9");
   await expect(page.getByRole("heading", { name: "Настройки" })).toHaveCount(0);
-  await page.keyboard.press("Control+5");
+  await page.keyboard.press(`Control+${settingsDefaultKey}`);
   await expect(page.getByRole("heading", { name: "Настройки" })).toBeVisible();
 });
 
@@ -2749,6 +4149,182 @@ test("настройки: вкладки показывают только св�
   // .section-title, а не текст по всей секции: слова из разных разделов
   // приложения встречаются и в тексте Справки (v0.9.29).
   await expect(page.locator("section .section-title", { hasText: "Хоткеи" })).toBeVisible();
+});
+
+test("настройки: текст и границы спрятаны за раскрывашкой, остальные цвета видны сразу", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Три основных поля видны без единого клика: остальные поверхности выводятся
+  // из фона, а не задаются отдельно.
+  for (const label of ["Акцент", "Доп. акцент", "Фон"]) {
+    await expect(page.locator("label.check", { hasText: label }).first()).toBeVisible();
+  }
+
+  // Переопределения выведенного — в DOM, но свёрнуты: сломать ими читаемость
+  // проще всего.
+  const advanced = page.locator("details.advanced-colors");
+  for (const label of ["Второй план", "Карточки", "Фон наведения", "Границы", "Основной", "Подписи"]) {
+    await expect(advanced.locator("label.check", { hasText: label })).not.toBeVisible();
+  }
+
+  await advanced.locator("summary").click();
+  for (const label of ["Второй план", "Карточки", "Фон наведения", "Границы", "Основной", "Подписи"]) {
+    await expect(advanced.locator("label.check", { hasText: label })).toBeVisible();
+  }
+  // «Сбросить к дефолту» уехал внутрь вместе с ними.
+  await expect(advanced.getByRole("button", { name: "Сбросить к дефолту" })).toBeVisible();
+  // Заголовки групп: семь полей подряд читались бы как стена.
+  await expect(advanced.getByText("Поверхности")).toBeVisible();
+});
+
+test("настройки: цвет карточек переопределяется точечно и снимается крестиком", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  await page.locator("label.check", { hasText: "Фон" }).first()
+    .locator("input.color-input")
+    .evaluate((el: HTMLInputElement) => {
+      el.value = "#7a1520";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+  const advanced = page.locator("details.advanced-colors");
+  await advanced.locator("summary").click();
+  const cards = advanced.locator("label.check", { hasText: "Карточки" });
+
+  // Пока не тронуто — значение выведено из фона, крестика нет.
+  await expect(cards.locator("input.color-input")).toHaveClass(/is-default/);
+  await expect(cards.locator(".unset-btn")).toHaveCount(0);
+
+  await cards.locator("input.color-input").evaluate((el: HTMLInputElement) => {
+    el.value = "#00ff00";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-card").trim()
+  )).toBe("#00ff00");
+  // Соседний слой не тронут — он всё ещё следует фону.
+  expect(await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-secondary").trim()
+  )).not.toBe("#00ff00");
+
+  // Крестик возвращает выведенное значение, а не пустоту.
+  await cards.locator(".unset-btn").click();
+  await expect(cards.locator(".unset-btn")).toHaveCount(0);
+  const back = await page.evaluate(() =>
+    document.documentElement.style.getPropertyValue("--bg-card").trim()
+  );
+  expect(back).not.toBe("");
+  expect(back).not.toBe("#00ff00");
+});
+
+test("настройки: выбор фона перекрашивает карточки и подписи, а не только полотно", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  await page.locator("label.check", { hasText: "Фон" }).first()
+    .locator("input.color-input")
+    .evaluate((el: HTMLInputElement) => {
+      el.value = "#7a1520";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+  // Ровно тот дефект со скриншота: --bg-card не был настраиваемым и оставался
+  // от прежней темы, поэтому строки задач были чёрными на красном.
+  const vars = await page.evaluate(() => {
+    const s = document.documentElement.style;
+    return {
+      bg: s.getPropertyValue("--bg-primary"),
+      card: s.getPropertyValue("--bg-card"),
+      border: s.getPropertyValue("--border"),
+      textSecondary: s.getPropertyValue("--text-secondary"),
+    };
+  });
+  expect(vars.bg).toBe("#7a1520");
+  for (const [name, value] of Object.entries(vars)) {
+    expect(value, name).toMatch(/^#[0-9a-f]{6}$/);
+  }
+  expect(vars.card).not.toBe(vars.bg);
+});
+
+test("настройки: свотч неустановленного цвета показывает дефолт темы, а не индиго", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Мок отдаёт все color_* пустыми, значит все свотчи — дефолтные.
+  const bg = page.locator("label.check", { hasText: "Фон" }).first().locator("input.color-input");
+  await expect(bg).toHaveValue("#ffffff");
+  await expect(bg).toHaveClass(/is-default/);
+
+  // Выбор цвета снимает пометку дефолта.
+  await bg.evaluate((el: HTMLInputElement) => {
+    el.value = "#123456";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(bg).not.toHaveClass(/is-default/);
+});
+
+test("настройки: свой пресет сохраняется, применяется и удаляется", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  // Пока ничего не сохранено — блока «Мои пресеты» нет.
+  await expect(page.getByText("Мои пресеты")).toHaveCount(0);
+
+  const bg = page.locator("label.check", { hasText: "Фон" }).first().locator("input.color-input");
+  const setColor = async (locator: typeof bg, value: string) => {
+    await locator.evaluate((el: HTMLInputElement, v) => {
+      el.value = v;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+  };
+
+  await setColor(bg, "#102030");
+  await page.locator("input.preset-name").fill("Ночной");
+  await page.getByRole("button", { name: "Сохранить текущие цвета" }).click();
+
+  // Набор появился, поле имени очистилось.
+  await expect(page.getByText("Мои пресеты")).toBeVisible();
+  await expect(page.locator("input.preset-name")).toHaveValue("");
+
+  // Меняем цвет и возвращаемся к набору — он восстанавливает сохранённое.
+  await setColor(bg, "#ffcc00");
+  await expect(bg).toHaveValue("#ffcc00");
+  await chooseCustomPreset(page, "Ночной");
+  await expect(bg).toHaveValue("#102030");
+
+  // Удаление — крестик прямо в строке списка.
+  const sel = customPresetSelect(page);
+  await sel.locator(".preset-trigger").click();
+  await sel.locator(".option-del").click();
+  await expect(page.getByText("Мои пресеты")).toHaveCount(0);
+});
+
+test("настройки: сохранённый пресет переживает перезагрузку", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+
+  await page.locator("label.check", { hasText: "Акцент" }).first()
+    .locator("input.color-input")
+    .evaluate((el: HTMLInputElement) => {
+      el.value = "#abcdef";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  await page.locator("input.preset-name").fill("Рабочий");
+  await page.getByRole("button", { name: "Сохранить текущие цвета" }).click();
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await customPresetSelect(page).locator(".preset-trigger").click();
+  await expect(page.locator(".preset-option", { hasText: "Рабочий" })).toBeVisible();
 });
 
 test("настройки: поиск скрывает несовпавшие секции и переключает вкладку", async ({ page }) => {
@@ -3009,7 +4585,7 @@ test("рутины: создание, блок в неделе, выключен
   await expect(page.getByRole("dialog").getByText("Планёрка")).toBeVisible();
 });
 
-test("трекинг: ▶ на задаче запускает, ■ останавливает", async ({ page }) => {
+test("трекинг: пункт меню запускает, он же останавливает", async ({ page }) => {
   await withMock(page);
   await page.goto("/");
   await page.evaluate(() => {
@@ -3026,20 +4602,17 @@ test("трекинг: ▶ на задаче запускает, ■ остана
   });
   await page.reload();
 
-  // Находим ▶ на строке задачи
+  // Запуск — из контекстного меню строки (v0.9.98)
   await expect(page.getByText("Трекинг-тест")).toBeVisible();
-  const playBtn = page.locator("button[title='Начать трекинг']");
-  await expect(playBtn).toBeVisible();
-  await playBtn.click();
+  await rowMenu(page, "Трекинг-тест", "Начать трекинг");
 
-  // Кнопка сменилась на ■
-  await expect(page.locator("button[title='Остановить трекинг']")).toBeVisible();
+  // Виджет трекинга появился в сайдбаре
+  await expect(page.locator(".track")).toContainText("Трекинг-тест");
 
-  // Виджет трекинга в сайдбаре
-  await expect(page.getByText("Трекинг-тест")).toBeVisible();
-
-  await page.locator("button[title='Остановить трекинг']").click();
-  await expect(page.locator("button[title='Начать трекинг']")).toBeVisible();
+  // Пункт меню теперь несёт обратное действие: он показывает состояние, а не
+  // только запускает. Останавливаем им же.
+  await rowMenu(page, "Трекинг-тест", "Остановить трекинг");
+  await expect(page.locator(".track")).toHaveCount(0);
 });
 
 test("фокус-режим: тумблер в настройках сохраняется и переживает перезагрузку", async ({ page }) => {
@@ -3051,8 +4624,9 @@ test("фокус-режим: тумблер в настройках сохран
   const toggle = page.getByLabel("Фокус-режим: авто-пауза уведомлений на время помодоро-работы и активных тайм-блоков");
   await expect(toggle).toBeChecked();
 
-  await toggle.uncheck();
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await flipSwitch(page, "Фокус-режим: авто-пауза уведомлений");
+  await expect(toggle).not.toBeChecked();
+  await waitSettingsSaved(page);
 
   await page.reload();
   await page.getByRole("button", { name: "Настройки" }).click();
@@ -3140,6 +4714,7 @@ test("умные списки: встроенные фильтруют спис�
   // Свой список по категории «Дом»
   await page.locator(".smart-list-add").click();
   await page.getByPlaceholder("Например: Важное").fill("Только дом");
+  // Диалог смарт-списка — не модалка задачи: здесь <select> остался родным.
   await page.locator(".modal.dialog select").first().selectOption({ label: "Дом" });
   await page.getByRole("button", { name: "Создать", exact: true }).click();
 
@@ -3175,10 +4750,10 @@ test("мультивыбор задач: Ctrl/Shift+клик выделяет с
   await expect(page.locator(".bulk-count")).toHaveText("3 выбрано");
   await expect(page.locator(".task-row.selected")).toHaveCount(3);
 
-  // Обычный клик по карточке всё ещё открывает редактирование, когда выбора нет
+  // Двойной клик по карточке всё ещё открывает её, когда выбора нет
   await page.locator(".bulk-bar .btn-icon").click(); // снять выбор
   await expect(page.locator(".bulk-bar")).toHaveCount(0);
-  await page.locator(".task-main", { hasText: "Мульти 1" }).click();
+  await page.locator(".task-main", { hasText: "Мульти 1" }).dblclick();
   await expect(page.locator(".modal.dialog")).toBeVisible();
   await page.locator(".modal.dialog").getByRole("button", { name: "Отмена" }).click();
 
@@ -3370,7 +4945,7 @@ test("авто-очистка истории: настройка сохраня�
   await expect(input).toHaveValue("0");
 
   await input.fill("6");
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
 
   await page.reload();
   await page.getByRole("button", { name: "Настройки" }).click();
@@ -3425,6 +5000,481 @@ test("канбан: доска встроена в Задачи через пе�
   // ("Написать отчёт" теперь Done+hidden, ушла в Историю — ожидаемо)
   await page.locator(".seg button", { hasText: "Список" }).click();
   await expect(page.getByText("Проверить почту", { exact: true })).toBeVisible();
+});
+
+// v0.10.06: сегменты переключателя одной ширины. Каждый мерился по своей
+// подписи, поэтому «Список» выходил 59.8px против «Доска» 55.6 и пара стояла
+// заметно кривой — тот же перекос в Активные/История/Корзина.
+test("переключатель: сегменты одной ширины", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+
+  const segWidths = async (i: number) =>
+    await page.locator(".page-head .seg").nth(i).evaluate((seg) =>
+      [...seg.querySelectorAll("button")].map((b) => +b.getBoundingClientRect().width.toFixed(2)));
+
+  // Список/Доска — подписи разной длины, ширины должны совпасть.
+  const modes = await segWidths(0);
+  expect(new Set(modes).size, `сегменты режима разной ширины: ${modes.join(", ")}`).toBe(1);
+
+  // Активные/История/Корзина — три сегмента, тот же инвариант.
+  const subs = await segWidths(1);
+  expect(subs.length).toBe(3);
+  expect(new Set(subs).size, `сегменты подвида разной ширины: ${subs.join(", ")}`).toBe(1);
+
+  // Вкладки Настроек — отдельный вариант .seg--underline со своей раскладкой:
+  // семь подписей разной длины, растягивать их по самой длинной незачем.
+  await page.getByRole("button", { name: "Настройки", exact: true }).click();
+  const tabs = await page.locator(".settings-tabs").evaluate((seg) =>
+    [...seg.querySelectorAll("button")].map((b) => +b.getBoundingClientRect().width.toFixed(2)));
+  expect(new Set(tabs).size, "вкладки Настроек выровняли по ширине заодно").toBeGreaterThan(1);
+});
+
+// v0.10.07: колонка доходит до низа окна, а не до вычисленной наугад высоты.
+// Было max-height: calc(100vh - 220px), где 220 — догадка про всё, что выше
+// доски. На окне 940 колонка кончалась на 794, ниже оставалось 146px пустой
+// страницы, и эти 146 были недостижимы: карточки прокручиваются внутри колонки,
+// а не страницей. Высота считается от реального положения доски.
+test("доска: колонка доходит до низа окна, последняя карточка прокручивается целиком", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 940 });
+  await withMock(page);
+  await page.goto("/");
+  await page.evaluate(() => {
+    const db = JSON.parse(localStorage.getItem("__mock_db")!);
+    const now = new Date().toISOString();
+    // Заведомо больше, чем влезает: колонка обязана прокручиваться.
+    for (let i = 0; i < 25; i++) {
+      db.tasks.push({ id: `hh${i}`, title: `Готовая задача ${i}`, status: "Done", priority: "Low",
+        category: "Other", tags: [], description: null, deadline: null, recurrence: "None",
+        hidden: false, project_id: null, scheduled_at: null, scheduled_mins: null,
+        sort_order: i, subtasks: [], created_at: now, updated_at: now, completed_at: null });
+    }
+    localStorage.setItem("__mock_db", JSON.stringify(db));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+
+  const doneCol = page.locator(".column", { hasText: "Готово" });
+
+  // Низ колонки у нижнего края окна: 8px — это padding-bottom самой доски.
+  // Границы с двух сторон: слишком большой зазор — недостижимая пустая страница
+  // (исходный баг, 146px), отрицательный — колонка вылезла за нижний край.
+  const gap = await doneCol.evaluate((el) =>
+    window.innerHeight - Math.round(el.getBoundingClientRect().bottom));
+  expect(gap, "под колонкой осталась пустая страница").toBeLessThanOrEqual(10);
+  expect(gap, "колонка вылезла за нижний край окна").toBeGreaterThanOrEqual(0);
+
+  // Собственно просьба: доскроллив колонку, видно последнюю карточку целиком.
+  const last = await doneCol.evaluate(async (col) => {
+    const body = col.querySelector(".column-body") as HTMLElement;
+    body.scrollTop = body.scrollHeight;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const cards = body.querySelectorAll(".board-card");
+    const rect = cards[cards.length - 1].getBoundingClientRect();
+    return { bottom: rect.bottom, bodyBottom: body.getBoundingClientRect().bottom, n: cards.length };
+  });
+  expect(last.n, "карточки не отрисовались").toBe(25);
+  expect(last.bottom, "последняя карточка обрезана").toBeLessThanOrEqual(last.bodyBottom + 1);
+
+  // Высота не константа: на узком окне шапка переносится, доска уезжает вниз,
+  // и колонка обязана пересчитаться — иначе она вылезет за нижний край.
+  await page.setViewportSize({ width: 700, height: 940 });
+  // Оба конца снова: без пересчёта колонка сохраняет прежнюю высоту от съехавшей
+  // вниз доски и вылезает за край — зазор уходит в минус, а не растёт.
+  await expect
+    .poll(async () => await doneCol.evaluate((el) =>
+      window.innerHeight - Math.round(el.getBoundingClientRect().bottom)),
+      { message: "колонка не пересчиталась под перенос шапки" })
+    .toBeGreaterThanOrEqual(0);
+  expect(await doneCol.evaluate((el) =>
+    window.innerHeight - Math.round(el.getBoundingClientRect().bottom)),
+    "после переноса шапки под колонкой пустая страница").toBeLessThanOrEqual(10);
+});
+
+// v0.10.10: Ctrl+` открывает «Сегодня», а Ctrl+Tab внутри Задач переключает
+// Список/Доску. «Сегодня» ушло с Ctrl+7: это экран «что сейчас», а не седьмой
+// раздел по счёту, и цифровой ряд остался за разделами.
+test("хоткеи: Ctrl+` открывает Сегодня, Ctrl+7 больше не навигация", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await expect(page.locator(".page-title")).toHaveText("Задачи");
+
+  await page.keyboard.press("Control+Backquote");
+  // По корню экрана, а не по заголовку: «Сегодня» встречается ещё и в заголовках
+  // секций (getByRole ловил три элемента), а свой .page-title у этого экрана
+  // не используется — там .today-header h2.
+  await expect(page.locator(".today-view"), "Ctrl+` не открыл Сегодня").toBeVisible();
+
+  // Старая комбинация освободилась и никуда не ведёт.
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await expect(page.locator(".page-title")).toHaveText("Задачи");
+  await page.keyboard.press("Control+7");
+  await expect(page.locator(".page-title"), "Ctrl+7 всё ещё навигация").toHaveText("Задачи");
+  await expect(page.locator(".today-view"), "Ctrl+7 всё ещё открывает Сегодня").toHaveCount(0);
+});
+
+test("хоткеи: Ctrl+Tab переключает Список/Доску и работает в обе стороны", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+
+  const activeMode = page.locator(".page-head .seg button.active").first();
+  await expect(activeMode).toHaveText("Список");
+
+  await page.keyboard.press("Control+Tab");
+  await expect(activeMode, "Ctrl+Tab не переключил на Доску").toHaveText("Доска");
+
+  // Обратно: переключатель, а не «перейти на доску».
+  await page.keyboard.press("Control+Tab");
+  await expect(activeMode, "Ctrl+Tab не вернул в Список").toHaveText("Список");
+
+  // Из Доски тоже работает: обработчик стоит до проверок курсора списка,
+  // которые в режиме Доски выходят раньше.
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+  await expect(activeMode).toHaveText("Доска");
+  await page.keyboard.press("Control+Tab");
+  await expect(activeMode, "из Доски Ctrl+Tab не сработал").toHaveText("Список");
+
+  // Внутри модалки Tab ходит по её полям — переключать вид он не должен.
+  await createTask(page, "задача для модалки");
+  await page.locator(".task-main", { hasText: "задача для модалки" }).dblclick();
+  await expect(page.locator(".modal.dialog")).toBeVisible();
+  await page.keyboard.press("Control+Tab");
+  await expect(page.locator(".modal.dialog"), "модалка закрылась от Ctrl+Tab").toBeVisible();
+  await expect(activeMode, "Ctrl+Tab сработал поверх модалки").toHaveText("Список");
+});
+
+// v0.10.12: логотип KRIPTAG набран вшитым Space Grotesk.
+// Главная ловушка: если шрифт не подгрузился, font-family молча откатывается к
+// system-ui — правило выглядит рабочим, а надпись рисуется как раньше. Поэтому
+// проверяется не только статус загрузки, но и что глифы ДРУГИЕ: та же строка в
+// вшитом шрифте и в системном должна мериться по-разному.
+test("логотип: KRIPTAG набран вшитым гротеском, а не системным шрифтом", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  const brand = page.locator(".brand");
+  await expect(brand).toHaveText("KRIPTAG");
+
+  const font = await page.evaluate(async () => {
+    await (document as { fonts: FontFaceSet }).fonts.ready;
+    const el = document.querySelector(".brand") as HTMLElement;
+    const measure = (family: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.font = `700 15px ${family}`;
+      return Math.round(ctx.measureText("KRIPTAG").width * 100) / 100;
+    };
+    return {
+      family: getComputedStyle(el).fontFamily,
+      loaded: (document as { fonts: FontFaceSet }).fonts.check('700 15px "Kriptag Wordmark"'),
+      wordmark: measure('"Kriptag Wordmark"'),
+      system: measure("system-ui"),
+    };
+  });
+
+  expect(font.family, "логотип не ссылается на вшитый шрифт").toContain("Kriptag Wordmark");
+  expect(font.loaded, "шрифт логотипа не загрузился").toBe(true);
+  // Собственно доказательство, что это не откат на системный шрифт. Не строгое
+  // неравенство, а заметный отрыв: подменив @font-face на системную гарнитуру,
+  // я получил 68 против 68.21 — формально «разные», и проверка на !== молча
+  // прошла. Настоящий гротеск уже 62 против 68.21, то есть отрыв больше 4px.
+  expect(
+    Math.abs(font.wordmark - font.system),
+    `надпись мерится почти как системным шрифтом (${font.wordmark} против ${font.system}) — похоже на откат`,
+  ).toBeGreaterThan(3);
+});
+
+// v0.10.06: ширина колонок Доски тянется за разделитель и переживает перезапуск.
+// Каждая колонка своей ширины: разделитель двигает ту, что слева от него, и не
+// трогает остальные. Ширины лежат в карте по id статуса, поэтому удалённая или
+// добавленная колонка не ломает остальные.
+test("доска: разделитель меняет только свою колонку и переживает перезапуск", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+
+  const widths = async () =>
+    await page.locator(".column").evaluateAll((els) =>
+      els.map((e) => Math.round(e.getBoundingClientRect().width)));
+
+  // Ручка у каждой колонки, включая последнюю: она стоит справа от своей
+  // колонки, а не в промежутке между парой. С ручками только в промежутках
+  // крайнюю правую колонку нельзя было потянуть вовсе.
+  const cols = await page.locator(".column").count();
+  expect(await page.locator(".col-resize").count(), "у крайней колонки нет своей ручки").toBe(cols);
+
+  const drag = async (nth: number, dx: number) => {
+    const h = page.locator(".col-resize").nth(nth);
+    const b = (await h.boundingBox())!;
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width / 2 + dx, b.y + b.height / 2, { steps: 8 });
+    await page.mouse.up();
+  };
+
+  expect(await widths()).toEqual([260, 260, 260]);
+
+  // Первый разделитель тянет только первую колонку.
+  await drag(0, 100);
+  expect(await widths(), "первый разделитель задел соседей").toEqual([360, 260, 260]);
+
+  // Второй — только вторую, и первая остаётся там, где её оставили.
+  await drag(1, -50);
+  expect(await widths(), "второй разделитель задел соседей").toEqual([360, 210, 260]);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  expect(await widths(), "ширины не пережили перезапуск").toEqual([360, 210, 260]);
+
+  // Прижатие к границам: тянуть можно сколько угодно, ширина упрётся.
+  await drag(0, -900);
+  expect((await widths())[0], "нет нижней границы").toBe(180);
+  await drag(0, 1400);
+  expect((await widths())[0], "нет верхней границы").toBe(520);
+
+  // Клавиатура — единственный способ без мыши. Shift даёт крупный шаг.
+  await page.locator(".col-resize").first().focus();
+  await page.keyboard.press("ArrowLeft");
+  expect((await widths())[0], "стрелка не меняет ширину").toBe(510);
+  await page.keyboard.press("Shift+ArrowLeft");
+  expect((await widths())[0], "Shift не даёт крупный шаг").toBe(470);
+  // Соседей клавиатура тоже не трогает.
+  expect((await widths())[1], "клавиатура задела соседнюю колонку").toBe(210);
+
+  // Последняя колонка тянется так же, как остальные, и соседей не трогает.
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  const before = await widths();
+  await drag(cols - 1, 120);
+  const after = await widths();
+  expect(after[cols - 1], "последняя колонка не потянулась").toBe(before[cols - 1] + 120);
+  expect(after.slice(0, cols - 1), "последняя ручка задела соседей").toEqual(before.slice(0, cols - 1));
+
+  // Мусор в хранилище не должен ломать доску.
+  await page.evaluate(() => {
+    const st = JSON.parse(localStorage.getItem("ui_state")!);
+    st.boardColWidths = "очень широко";
+    localStorage.setItem("ui_state", JSON.stringify(st));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  expect(await widths(), "битое значение не откатилось к умолчанию").toEqual([260, 260, 260]);
+
+  // Одна битая запись не должна стоить ширины остальным.
+  await page.evaluate(() => {
+    const st = JSON.parse(localStorage.getItem("ui_state")!);
+    st.boardColWidths = { Todo: 400, InProgress: "широко" };
+    localStorage.setItem("ui_state", JSON.stringify(st));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  expect(await widths(), "битая запись утащила соседей").toEqual([400, 260, 260]);
+});
+
+// v0.10.03: Доска отстала от Списка на три версии — кромка приоритета (v0.9.97),
+// контурный чип категории (v0.9.99) и контекстное меню (v0.9.98) прошли мимо
+// .board-card. Тест держит все три и главную ловушку доски: карточка — это
+// <button> с onclick, поэтому правая кнопка не должна заодно открыть модалку.
+test("доска: приоритет кромкой, контурный чип, меню по правой кнопке без модалки", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.evaluate(() => {
+    const db = JSON.parse(localStorage.getItem("__mock_db")!);
+    const now = new Date().toISOString();
+    db.tasks.push({
+      id: "bu1", title: "Согласовать смету", status: "Todo", priority: "Critical", category: "Work",
+      tags: [], description: null, deadline: null, recurrence: "None", hidden: false, project_id: null,
+      scheduled_at: null, scheduled_mins: null, sort_order: 1, subtasks: [], created_at: now, updated_at: now, completed_at: null,
+    });
+    localStorage.setItem("__mock_db", JSON.stringify(db));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+
+  const card = page.locator(".board-card", { hasText: "Согласовать смету" });
+  await expect(card).toBeVisible();
+
+  // Точки внутри заголовка больше нет — она сдвигала заголовки вправо на свою
+  // ширину, из-за чего в колонке они начинались с разного отступа.
+  await expect(card.locator(".prio-dot")).toHaveCount(0);
+
+  // Кромка рисуется в ::before, и её нельзя проверять через getComputedStyle:
+  // тот возвращает объявленное правило даже при content: none, то есть когда на
+  // экране ничего нет. Проверено — с content:none стиль по-прежнему отдавал
+  // 3px и красный. Поэтому цвет снимается со скриншота: это единственное, что
+  // отличает нарисованную полоску от объявленной.
+  // Проверяется тем, что элемент реально занимает место: ::before растягивает
+  // карточку по высоте (top/bottom: 3px), поэтому при content: none её высота
+  // не изменится, а вот сама полоска исчезнет из точки под левым краем. Берётся
+  // стек элементов в этой точке — псевдоэлемент отдаёт свой хозяин, поэтому
+  // сравнивается ширина зазора между текстом и краем карточки.
+  const geom = await card.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const before = getComputedStyle(el, "::before");
+    const title = el.querySelector(".board-card-title") as HTMLElement;
+    return {
+      padLeft: cs.paddingLeft,
+      content: before.content,
+      width: before.width,
+      bg: before.backgroundColor,
+      titleLeft: title.getBoundingClientRect().left - el.getBoundingClientRect().left,
+    };
+  });
+  // content обязателен: без него правило существует, но ничего не рисует —
+  // getComputedStyle при этом всё равно отдаёт width и цвет.
+  expect(geom.content, "кромка объявлена, но ничего не рисует").toBe('""');
+  expect(geom.width, "у карточки нет кромки приоритета").toBe("3px");
+  expect(geom.bg, "кромка не окрашена в цвет приоритета").toBe("rgb(220, 38, 38)");
+  // Место под кромку зарезервировано, иначе она легла бы на текст.
+  expect(geom.padLeft, "под кромку не отведено место").toBe("13px");
+
+  // Чип категории контурный: заливка зарезервирована за активным фильтром.
+  const chip = card.locator(".chip-cat");
+  await expect(chip).toHaveClass(/chip-cat--edge/);
+  await expect(chip).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
+  // Правая кнопка открывает то же меню, что и в Списке...
+  await card.click({ button: "right" });
+  await expect(page.locator('[role="menu"]')).toBeVisible();
+  await expect(page.locator('[role="menuitem"]', { hasText: "Удалить" })).toBeVisible();
+  // ...и при этом НЕ срабатывает onclick карточки, открывающий модалку.
+  await expect(page.locator(".modal.dialog")).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+
+  // Левый клик по-прежнему открывает модалку — жест старше меню.
+  await card.click();
+  await expect(page.locator(".modal.dialog")).toBeVisible();
+});
+
+// v0.10.04: последнее расхождение Доски со Списком — состояния, которых на
+// карточке не было видно вовсе. Заблокированная задача выглядела готовой к
+// работе, а прогресс по подзадачам был виден только в Списке.
+// v0.10.05: шапка Задач одинаковой ширины в обоих режимах. Ограничение 1200px
+// стояло на .page, и шапка его наследовала: в Списке она обрывалась, не доходя
+// до края, а на Доске (1600px) шла до конца — одна и та же панель меняла ширину
+// вслед за тем, что под ней. Ограничение переехало на содержимое под шапкой,
+// поэтому тест держит обе половины: шапка одинаковая, а строки по-прежнему
+// упираются в 1200 и не растягиваются на широком экране.
+test("шапка задач: одна ширина в обоих режимах, при этом список остаётся узким", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await withMock(page);
+  await page.goto("/");
+  await createTask(page, "задача для ширины");
+
+  const widthOf = async (sel: string) =>
+    await page.locator(sel).evaluate((el) => Math.round(el.getBoundingClientRect().width));
+
+  const headList = await widthOf(".page-head");
+  const listWidth = await widthOf(".task-list");
+
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+  const headBoard = await widthOf(".page-head");
+
+  expect(headList, "шапка в Списке уже, чем на Доске").toBe(headBoard);
+
+  // Вторая половина: ограничение не исчезло, а переехало. Без этого «починкой»
+  // было бы просто снять max-width, и строки растянулись бы на весь монитор.
+  expect(listWidth, "список потерял ограничение ширины").toBe(1200);
+  expect(headList, "шапка всё ещё обрезана по ширине списка").toBeGreaterThan(1200);
+
+  // На широком экране строки не тянутся дальше — именно ради этого cap и нужен.
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await page.locator(".seg button", { hasText: "Список" }).click();
+  expect(await widthOf(".task-list"), "на широком экране список растянулся").toBe(1200);
+
+  // Окно шире потолка Доски (1600). Правило .board-mode > * той же
+  // специфичности, что и снятие потолка с шапки, поэтому порядок правил решает
+  // исход: стоя выше, .board-mode возвращал шапке потолок 1600 и ширины снова
+  // расходились — тот же дефект, просто дальше по шкале. При 1440 этого не
+  // видно, окно туда не достаёт.
+  await page.setViewportSize({ width: 2200, height: 900 });
+  const wideList = await widthOf(".page-head");
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+  expect(await widthOf(".page-head"), "на очень широком экране шапка Доски снова уже").toBe(wideList);
+
+  // Всё под шапкой начинается там же, где шапка. Потолок ширины не должен
+  // центрировать детей: .task-list не прямой ребёнок .page и центрирование его
+  // не касалось, поэтому чипы с композером уезжали вправо, а список оставался
+  // на месте — три разных левых края на одном экране.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator(".seg button", { hasText: "Список" }).click();
+  const leftOf = async (sel: string) =>
+    await page.locator(sel).first().evaluate((el) => Math.round(el.getBoundingClientRect().left));
+  const headLeft = await leftOf(".page-head");
+  for (const sel of [".smart-lists", ".task-list"]) {
+    expect(await leftOf(sel), `${sel} не совпадает по левому краю с шапкой`).toBe(headLeft);
+  }
+});
+
+test("доска: счётчик подзадач и признак блокировки на карточке", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.evaluate(() => {
+    const db = JSON.parse(localStorage.getItem("__mock_db")!);
+    const now = new Date().toISOString();
+    const base = {
+      status: "Todo", priority: "Medium", category: "Work", tags: [], description: null,
+      deadline: null, recurrence: "None", hidden: false, project_id: null,
+      scheduled_at: null, scheduled_mins: null, subtasks: [], created_at: now,
+      updated_at: now, completed_at: null,
+    };
+    db.tasks.push(
+      { ...base, id: "sb1", title: "Частично сделана", sort_order: 1,
+        subtasks: [
+          { id: "s1", task_id: "sb1", title: "раз", done: true, sort_order: 1 },
+          { id: "s2", task_id: "sb1", title: "два", done: false, sort_order: 2 },
+          { id: "s3", task_id: "sb1", title: "три", done: false, sort_order: 3 },
+        ] },
+      { ...base, id: "sb2", title: "Всё отмечено", sort_order: 2,
+        subtasks: [{ id: "s4", task_id: "sb2", title: "готово", done: true, sort_order: 1 }] },
+      { ...base, id: "sb3", title: "Без подзадач", sort_order: 3 },
+      { ...base, id: "sb4", title: "Ждёт другую", sort_order: 4 },
+      { ...base, id: "sb5", title: "Держит четвёртую", sort_order: 5 },
+    );
+    db.taskDeps = [{ task_id: "sb4", blocker_id: "sb5" }];
+    localStorage.setItem("__mock_db", JSON.stringify(db));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await page.locator(".seg button", { hasText: "Доска" }).click();
+
+  const card = (title: string) => page.locator(".board-card", { hasText: title });
+
+  // Счётчик — только цифры, без шкалы и без кнопки: разворачивать на карточке некуда.
+  await expect(card("Частично сделана").locator(".chip-subs")).toHaveText("1/3");
+  await expect(card("Частично сделана").locator(".sub-track")).toHaveCount(0);
+
+  // Всё отмечено — зелёный, как в Списке.
+  const done = card("Всё отмечено").locator(".chip-subs");
+  await expect(done).toHaveText("1/1");
+  await expect(done).toHaveClass(/subs-done/);
+  await expect(card("Частично сделана").locator(".chip-subs")).not.toHaveClass(/subs-done/);
+
+  // Без подзадач чипа нет вовсе — пустой "0/0" был бы шумом.
+  await expect(card("Без подзадач").locator(".chip-subs")).toHaveCount(0);
+
+  // Блокировка: гаснет содержимое, но не карточка — иначе погасла бы и кромка
+  // приоритета, единственный цветной признак в колонке.
+  const blockedCard = card("Ждёт другую");
+  await expect(blockedCard).toHaveClass(/blocked/);
+  await expect(blockedCard).toHaveCSS("opacity", "1");
+  await expect(blockedCard.locator(".board-card-title")).toHaveCSS("opacity", "0.55");
+
+  // Причина блокировки — в подсказке карточки, а не отдельной строкой:
+  // в узкой колонке лишняя строка гоняла бы высоту карточек.
+  await expect(blockedCard).toHaveAttribute("title", /Держит четвёртую/);
+
+  // Незаблокированная карточка держит в подсказке приоритет, а не блокера.
+  await expect(card("Без подзадач")).toHaveAttribute("title", /Приоритет/);
+  await expect(card("Без подзадач")).not.toHaveClass(/blocked/);
 });
 
 test("канбан: своя колонка добавляется на доске, управляется в Настройках, встроенные статусы защищены", async ({ page }) => {
@@ -3726,7 +5776,7 @@ test("настройки: глобальные хоткеи переназнач
   await page.keyboard.press("Control+Alt+P");
   await expect(slotRow.locator(".keybind-combo")).toHaveText("Ctrl+Alt+P");
 
-  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await waitSettingsSaved(page);
 
   const saved = await page.evaluate(() =>
     JSON.parse(JSON.parse(localStorage.getItem("__mock_db")!).settings.global_keybinds));
@@ -3837,7 +5887,7 @@ test("язык: экраны Задачи и Заметки переведены
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // --- Задачи ---
   await page.getByRole("button", { name: "Tasks", exact: true }).click();
@@ -3876,7 +5926,7 @@ test("язык: Календарь, Дашборд и модалка задач�
   await createTask(page, "Report");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // --- Календарь ---
   await page.getByRole("button", { name: "Calendar", exact: true }).click();
@@ -3892,7 +5942,7 @@ test("язык: Календарь, Дашборд и модалка задач�
 
   // --- Модалка задачи ---
   await page.getByRole("button", { name: "Tasks", exact: true }).click();
-  await page.locator(".task-main").first().click();
+  await page.locator(".task-main").first().dblclick();
   await expect(page.locator(".modal")).toBeVisible();
   // Категории и статусы намеренно исключены: это НЕ строки интерфейса, а
   // строки в БД (миграции 0015/0029), которые пользователь переименовывает и
@@ -3913,7 +5963,7 @@ test("язык: экран «Сегодня», палитра и уведомл�
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // --- Сегодня ---
   await page.getByRole("button", { name: "Today", exact: true }).click();
@@ -3974,7 +6024,7 @@ test("язык: Настройки и Sidebar переведены целико�
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // Sidebar: кнопки Поиск и Уведомления жили без t() до v0.9.46
   await expect(page.getByRole("button", { name: /Search/ })).toBeVisible();
@@ -4023,7 +6073,7 @@ test("язык: посевные категории и статусы перев
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   // Настройки: имена в полях переименования. Посевные показываются
   // переведёнными и потому заблокированы — иначе правка соседнего поля
@@ -4055,11 +6105,18 @@ test("язык: посевные категории и статусы перев
 
   // Модалка задачи: выпадающие списки категории и статуса
   await page.getByRole("button", { name: /^List$/ }).click();
-  await page.locator(".task-row", { hasText: "task with category" }).click();
+  await page.locator(".task-row", { hasText: "task with category" }).dblclick();
   const modal = page.locator(".modal, dialog").first();
-  await expect(modal.locator("option", { hasText: "Work" }).first()).toBeAttached();
-  await expect(modal.locator("option", { hasText: "In progress" }).first()).toBeAttached();
-  await expect(modal.locator("option", { hasText: "Работа" })).toHaveCount(0);
+  // Пункты существуют только у раскрытого списка (свой Select вместо родного
+  // <select>), поэтому каждый открывается отдельно.
+  await modal.getByRole("button", { name: "Category", exact: true }).click();
+  await expect(page.getByRole("option", { name: "Work", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Работа" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await modal.getByRole("button", { name: "Status", exact: true }).click();
+  await expect(page.getByRole("option", { name: "In progress", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
 
   // Дашборд: легенда пончика «Выполнено по категориям»
@@ -4087,7 +6144,7 @@ test("язык: дата в подсказке календаря идёт за 
   await page.goto("/");
 
   await page.getByRole("button", { name: "Настройки" }).click();
-  await page.locator("label", { hasText: "Язык" }).locator("select").selectOption("en");
+  await pickSetting(page, "Язык", "English");
 
   await page.getByRole("button", { name: /^Dashboard$/ }).click();
   await page.locator(".cal-cell:not(.lead)").last().hover();
@@ -4500,9 +6557,9 @@ function taskByTitle(page: Page, title: string) {
 }
 
 async function blockWith(page: Page, taskTitle: string, blockerTitle: string) {
-  await taskByTitle(page, taskTitle).locator(".task-main").click();
+  await taskByTitle(page, taskTitle).locator(".task-main").dblclick();
   const modal = page.locator(".modal");
-  await modal.locator("select").last().selectOption({ label: blockerTitle });
+  await pickOption(page, modal, "Добавить блокер...", blockerTitle);
   await modal.getByRole("button", { name: "Отмена" }).click();
 }
 
@@ -4537,7 +6594,7 @@ test("зависимости: блокер в Корзине не блокиру
   await blockWith(page, "стены", "фундамент");
   await expect(taskByTitle(page, "стены")).toHaveClass(/blocked/);
 
-  await taskByTitle(page, "фундамент").getByTitle("Удалить").click();
+  await rowMenu(page, "фундамент", "Удалить");
   await expect(taskByTitle(page, "стены")).not.toHaveClass(/blocked/);
 
   // Восстановили — блокировка вернулась
@@ -4834,7 +6891,9 @@ test("клавиатура: в поле ввода j печатается, а н
   await expect(page.locator(".task-row.kb-focused")).toHaveCount(0);
 });
 
-test("клавиатура: Enter открывает карточку задачи под курсором", async ({ page }) => {
+// Enter повторяет одинарный клик — правит название прямо в строке, а не открывает
+// карточку. Иначе клавиатура и мышь делали бы одно и то же двумя разными вещами.
+test("клавиатура: Enter правит название задачи под курсором", async ({ page }) => {
   await seedDb(page, navTasksDb());
   await withMock(page);
   await page.goto("/");
@@ -4843,9 +6902,16 @@ test("клавиатура: Enter открывает карточку задач
   await page.keyboard.press("j");
   await page.keyboard.press("Enter");
 
-  const modal = page.locator(".modal");
-  await expect(modal).toBeVisible();
-  await expect(modal.getByLabel("Название")).toHaveValue("вторая");
+  // Карточка не открылась — правка идёт в строке.
+  await expect(page.locator(".modal")).toHaveCount(0);
+  const editor = page.locator(".task-title-edit");
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue("вторая");
+
+  await editor.fill("вторая переименованная");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".task-title-edit")).toHaveCount(0);
+  await expect(page.getByText("вторая переименованная")).toBeVisible();
 });
 
 test("клавиатура: пробел выполняет задачу под курсором", async ({ page }) => {
@@ -5007,8 +7073,8 @@ test("счётчик «разблокирует N» не зависит от ф�
   // Кладём блокер в проект через карточку задачи.
   await page.locator(".task-row")
     .filter({ has: page.locator(".task-title", { hasText: "первая" }) })
-    .locator(".task-main").click();
-  await page.locator(".modal").getByLabel("Проект").selectOption({ label: "Проект" });
+    .locator(".task-main").dblclick();
+  await pickOption(page, page.locator(".modal"), "Проект", "Проект");
   await page.locator(".modal").getByRole("button", { name: "Сохранить", exact: true }).click();
 
   await page.locator(".project-filter").selectOption({ label: "Проект" });
@@ -5091,9 +7157,7 @@ test("состояние экранов: Корзина НЕ запоминае�
 
   // Корзина должна быть непустой, иначе список вообще не отрисуется и проверка
   // «не открылись в Корзине» стала бы бессодержательной.
-  await page.locator(".task-row")
-    .filter({ has: page.locator(".task-title", { hasText: "третья" }) })
-    .getByTitle("Удалить").click();
+  await rowMenu(page, "третья", "Удалить");
   await page.getByRole("button", { name: "Корзина", exact: true }).click();
   await expect(page.locator(".task-list.trash")).toBeVisible();
 

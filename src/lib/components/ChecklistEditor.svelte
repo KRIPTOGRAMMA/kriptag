@@ -31,7 +31,7 @@
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
   import {
     CHECK_RE, toggleLine, lineIndexAt, removeLineAt, emptyAfterBackspace,
-    dropEmptyLines, repairChecklistMarkup,
+    dropEmptyLines, repairChecklistMarkup, moveLineToEnd, parseChecklist,
   } from "../checklistText";
 
   type Props = {
@@ -48,34 +48,88 @@
   let hostEl: HTMLDivElement | undefined = $state();
   let view: EditorView | undefined;
 
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  // The box as a pair of brackets rather than a full square: two vertical edges
+  // with short arms top and bottom, which is what `[ ]` looks like and what the
+  // markup underneath literally is. The tick sits between them.
+  //
+  // Coordinates are in a 14x14 viewBox, matching the rendered size 1:1, so the
+  // strokes land on whole pixels instead of being resampled.
+  const CHECK_PATHS: [string, string][] = [
+    ["cm-sub-bracket", "M4.6 1.2 L1.6 1.2 L1.6 12.8 L4.6 12.8"],
+    ["cm-sub-bracket", "M9.4 1.2 L12.4 1.2 L12.4 12.8 L9.4 12.8"],
+    ["cm-sub-tick", "M4.2 7.2 L6.4 9.4 L10 4.9"],
+  ];
+
   class CheckboxWidget extends WidgetType {
     checked: boolean;
     pos: number;
-    constructor(checked: boolean, pos: number) {
+    // The line's text is part of the widget's identity, and it has to be. The DOM
+    // node is a real <input type="checkbox">, so clicking it flips the browser's
+    // own checked property; CodeMirror reuses any node whose widget compares equal.
+    // Comparing only {checked, pos} meant that after a tick reordered the lines,
+    // the line moving into a vacated offset matched the widget that used to live
+    // there and inherited its flipped box. Measured: ticking one of two subtasks
+    // drew BOTH boxes checked while the text and the strike-through were correct.
+    text: string;
+    constructor(checked: boolean, pos: number, text: string) {
       super();
       this.checked = checked;
       this.pos = pos;
+      this.text = text;
     }
     eq(other: CheckboxWidget) {
-      return other.checked === this.checked && other.pos === this.pos;
+      return other.checked === this.checked && other.pos === this.pos
+        && other.text === this.text;
     }
     toDOM() {
+      // A real <input type="checkbox"> wrapped in a <label>, with an SVG drawn on
+      // top. The input keeps the semantics — a screen reader still announces a
+      // checkbox and its state — while the SVG supplies the shape, which is a
+      // bracket pair and cannot be made out of a box's own borders.
+      //
+      // SVG rather than a font glyph or an image: nothing to load, nothing to go
+      // missing from a font, and the strokes take their colour from the theme
+      // tokens like everything else.
+      const wrap = document.createElement("label");
+      wrap.className = "cm-sub-box";
+
       const box = document.createElement("input");
       box.type = "checkbox";
       box.checked = this.checked;
       box.className = "cm-sub-checkbox";
+
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("viewBox", "0 0 14 14");
+      svg.setAttribute("aria-hidden", "true");
+      svg.classList.add("cm-sub-svg");
+      for (const [cls, d] of CHECK_PATHS) {
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", d);
+        path.classList.add(cls);
+        svg.appendChild(path);
+      }
+
+      wrap.append(box, svg);
       // Focus stays in the text: clicking a checkbox must not knock the caret out
       // of the line the user is editing.
-      box.onmousedown = (e) => e.preventDefault();
+      wrap.onmousedown = (e) => e.preventDefault();
       box.onclick = () => {
         if (!view) return;
         const doc = view.state.doc.toString();
         const index = lineIndexAt(doc, this.pos);
-        const next = toggleLine(doc, index);
-        if (next === doc) return;
+        const toggled = toggleLine(doc, index);
+        if (toggled === doc) return;
+        // Ticking sinks the subtask below the ones still to do; unticking leaves it
+        // where it is. Reordering happens only here, on a deliberate mouse click —
+        // doing it on every edit would slide a line out from under the caret while
+        // the user is typing, and this is one shared text document.
+        const nowDone = parseChecklist(toggled)[index]?.done === true;
+        const next = nowDone ? moveLineToEnd(toggled, index) : toggled;
         view.dispatch({ changes: { from: 0, to: doc.length, insert: next } });
       };
-      return box;
+      return wrap;
     }
     ignoreEvent() { return false; }
   }
@@ -97,20 +151,31 @@
       const line = state.doc.line(n);
       const m = CHECK_RE.exec(line.text);
       if (m) {
+        const done = m[2] === "x" || m[2] === "X";
+        // A line decoration, not a mark over the text range: it has to survive the
+        // line being empty and must not fight the replace decoration that hides the
+        // markup at the same position.
+        if (done) {
+          items.push({
+            from: line.from,
+            to: line.from,
+            deco: Decoration.line({ class: "cm-sub-done" }),
+          });
+        }
         const from = line.from + m[1].length;
         const to = from + m[0].length - m[1].length;
         items.push({
           from,
           to,
           deco: Decoration.replace({
-            widget: new CheckboxWidget(m[2] === "x" || m[2] === "X", line.from),
+            widget: new CheckboxWidget(done, line.from, line.text),
           }),
         });
       } else if (line.text.trim()) {
         items.push({
           from: line.from,
           to: line.from,
-          deco: Decoration.widget({ widget: new CheckboxWidget(false, line.from), side: -1 }),
+          deco: Decoration.widget({ widget: new CheckboxWidget(false, line.from, line.text), side: -1 }),
         });
       }
     }
@@ -240,10 +305,115 @@
   const theme = EditorView.theme({
     "&": { fontSize: "13px" },
     "&.cm-focused": { outline: "none" },
-    ".cm-content": { padding: "4px 6px", fontFamily: "inherit", caretColor: "var(--text)" },
+    ".cm-content": { padding: "4px 6px", fontFamily: "inherit", caretColor: "var(--text-primary)" },
     ".cm-line": { padding: "0" },
     ".cm-scroller": { fontFamily: "inherit", lineHeight: "20px" },
-    ".cm-sub-checkbox": { marginRight: "6px", cursor: "pointer", verticalAlign: "middle" },
+    // The box is drawn by hand rather than left to the platform. The native
+    // checkbox is round on this GTK theme and takes its colour from the system
+    // rather than from the app's tokens — the same reason the <select> popups had
+    // to be replaced.
+    //
+    // The <label> is the visible box; the <input> inside it is kept for semantics
+    // and hidden, not removed, so it still carries the state to a screen reader.
+    ".cm-sub-box": {
+      position: "relative",
+      display: "inline-block",
+      width: "14px",
+      height: "14px",
+      margin: "0 6px 0 0",
+      flex: "0 0 auto",
+      cursor: "pointer",
+      verticalAlign: "-2px",
+    },
+    // Hidden but still focusable and still read out: opacity rather than
+    // display:none, which would take it out of the accessibility tree entirely.
+    ".cm-sub-checkbox": {
+      position: "absolute",
+      inset: "0",
+      width: "100%",
+      height: "100%",
+      margin: "0",
+      opacity: "0",
+      cursor: "pointer",
+    },
+    ".cm-sub-svg": {
+      display: "block",
+      width: "14px",
+      height: "14px",
+      pointerEvents: "none",
+    },
+    ".cm-sub-bracket": {
+      fill: "none",
+      stroke: "var(--text-secondary)",
+      strokeWidth: "1.6",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      transition: "stroke 160ms ease",
+    },
+    ".cm-sub-box:hover .cm-sub-bracket": { stroke: "var(--accent)" },
+    ".cm-sub-checkbox:focus-visible ~ .cm-sub-svg .cm-sub-bracket": {
+      stroke: "var(--accent)",
+    },
+    // The ticked colour is set by the cm-sub-tint animation below rather than
+    // declared here: with both, the static rule wins the cascade over an animation
+    // that has not started, and the brackets snap to the accent before the tick is
+    // drawn — the two halves of the same movement come apart.
+    // The tick is dashed out by its own length so an unticked box shows nothing.
+    // getTotalLength() on the rendered path measures 8.9 units; 10 is a small
+    // deliberate overshoot, so the line is certainly hidden without measuring at
+    // runtime.
+    ".cm-sub-tick": {
+      fill: "none",
+      stroke: "var(--accent)",
+      strokeWidth: "2",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      strokeDasharray: "10",
+      strokeDashoffset: "10",
+    },
+    // An animation, not a transition. A transition needs the element to persist
+    // across the change, and this one never does: every toggle rewrites the whole
+    // document, CodeMirror rebuilds the widget, and the new node arrives already
+    // ticked with no previous value to move from. Measured — the node identity
+    // differs before and after a click, and a transition produced no intermediate
+    // frames at all. An animation runs on mount, which is exactly when the ticked
+    // node appears.
+    ".cm-sub-checkbox:checked ~ .cm-sub-svg .cm-sub-tick": {
+      animation: "cm-sub-draw 220ms cubic-bezier(0.65, 0, 0.35, 1) forwards",
+    },
+    "@keyframes cm-sub-draw": {
+      from: { strokeDashoffset: "10" },
+      to: { strokeDashoffset: "0" },
+    },
+    // The brackets tint towards the accent over the same beat, so the box reads as
+    // one movement rather than a line appearing next to a colour change.
+    ".cm-sub-checkbox:checked ~ .cm-sub-svg .cm-sub-bracket": {
+      animation: "cm-sub-tint 220ms ease forwards",
+    },
+    "@keyframes cm-sub-tint": {
+      from: { stroke: "var(--text-secondary)" },
+      to: { stroke: "var(--accent)" },
+    },
+    // Motion is a preference, not a given: with it off the tick still appears, it
+    // just stops being drawn on.
+    "@media (prefers-reduced-motion: reduce)": {
+      ".cm-sub-checkbox:checked ~ .cm-sub-svg .cm-sub-tick": {
+        animation: "none",
+        strokeDashoffset: "0",
+      },
+      ".cm-sub-checkbox:checked ~ .cm-sub-svg .cm-sub-bracket": {
+        animation: "none",
+        stroke: "var(--accent)",
+      },
+      ".cm-sub-bracket": { transition: "none" },
+    },
+    // A completed subtask is struck through and dimmed. Both, not just the line:
+    // on a dark theme a thin rule over full-contrast text is easy to miss, and the
+    // dimming is what makes "done" readable at a glance down the list.
+    ".cm-sub-done": {
+      textDecoration: "line-through",
+      color: "var(--text-secondary)",
+    },
     ".cm-placeholder": { color: "var(--text-secondary)" },
   });
 
@@ -315,7 +485,7 @@
   .checklist-editor {
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg-input, var(--bg-card));
+    background: var(--bg-card);
     max-height: 30vh;
     overflow-y: auto;
   }

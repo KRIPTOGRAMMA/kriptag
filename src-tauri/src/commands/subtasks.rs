@@ -76,10 +76,76 @@ pub async fn toggle_subtask(pool: State<'_, SqlitePool>, id: String) -> AppResul
 }
 
 pub async fn toggle_subtask_impl(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let task_id: Option<String> = sqlx::query_scalar("SELECT task_id FROM subtasks WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+
     sqlx::query("UPDATE subtasks SET done = 1 - done WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await?;
+
+    if let Some(task_id) = task_id {
+        complete_if_all_subtasks_done(pool, &task_id).await?;
+    }
+    Ok(())
+}
+
+// Closes the task once its last subtask is ticked.
+//
+// This lives in the backend rather than in the checklist component because a
+// subtask is written from several places — the modal, the panel in the list, the
+// quick slot — and the rule has to hold for all of them, not only for the one the
+// user happened to use. Same reasoning as the blocked-task check in v0.9.56.
+//
+// Deliberately silent about failure to complete: the task may be blocked by a
+// dependency, and complete_task_impl rejects that. Ticking the last subtask is
+// not the moment to interrupt with an error about something else — the checklist
+// edit itself succeeded, and the block is already visible on the row.
+pub async fn complete_if_all_subtasks_done(pool: &SqlitePool, task_id: &str) -> AppResult<()> {
+    // A task with no subtasks is not "all done": there is nothing to finish, and
+    // adding the first unticked subtask would otherwise look like a candidate.
+    let (total, done): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(done), 0) FROM subtasks WHERE task_id = ?",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await?;
+    if total == 0 || done < total {
+        return Ok(());
+    }
+
+    // Already finished, or in the Trash — completing again would move the deadline
+    // of a recurring task a second time and stamp a fresh completed_at.
+    let row: Option<(bool, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT hidden, deleted_at, recurrence FROM tasks WHERE id = ?",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((hidden, deleted_at, recurrence)) = row else { return Ok(()) };
+    if hidden || deleted_at.is_some() {
+        return Ok(());
+    }
+    let repeats = recurrence.as_deref().is_some_and(|r| !r.is_empty() && r != "None");
+
+    // A recurring task is never hidden, so the guard above cannot stop it from
+    // completing over and over: completing a repeat unticks the whole checklist,
+    // so the next tick is again "the last one". Each round pushed the deadline
+    // another day forward and cleared notified_24h/1h/deadline, putting the task
+    // back in the notification queue — measured at five deadline shifts and five
+    // re-armings from five tick/untick rounds. That is the spam.
+    //
+    // A checklist of a single item is the whole problem: with two or more, the
+    // reset leaves the others unticked and the user has to genuinely redo them.
+    // So auto-completion is limited to lists where finishing means something —
+    // ticking one box cannot both close a run and immediately arm the next.
+    if repeats && total < 2 {
+        return Ok(());
+    }
+
+    let _ = crate::commands::tasks::complete_task_impl(pool, task_id.to_string()).await;
     Ok(())
 }
 
@@ -108,6 +174,10 @@ pub async fn delete_subtask(pool: State<'_, SqlitePool>, id: String) -> AppResul
     delete_subtask_impl(pool.inner(), &id).await
 }
 
+// Deliberately does NOT auto-complete the task, unlike toggling. Deleting the last
+// unticked subtask leaves an all-ticked list, but removing work is not finishing it
+// — closing the task there would be a destructive surprise from an edit the user
+// made for a different reason.
 pub async fn delete_subtask_impl(pool: &SqlitePool, id: &str) -> AppResult<()> {
     sqlx::query("DELETE FROM subtasks WHERE id = ?")
         .bind(id)
@@ -215,5 +285,207 @@ mod tests {
         let pool = test_pool().await;
         let err = add_subtask_impl(&pool, "task-1", "   ").await.unwrap_err();
         assert_eq!(err.to_string(), "Пустая подзадача");
+    }
+
+    // A helper task to hang subtasks on. Auto-completion reads the tasks table, so
+    // these cases need a real row rather than the bare "task-1" id the older tests
+    // use — those only ever touched the subtasks table.
+    async fn task_with(pool: &SqlitePool, recurrence: Option<crate::core::task::Recurrence>) -> String {
+        let created = crate::commands::tasks::create_task_impl(
+            pool,
+            crate::core::task::CreateTask {
+                title: "задача".into(),
+                description: None,
+                status: "Todo".into(),
+                priority: crate::core::task::Priority::Medium,
+                category: "Work".into(),
+                deadline: Some(Utc::now() + chrono::Duration::days(1)),
+                tags: vec![],
+                recurrence,
+                project_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        created.id
+    }
+
+    async fn task_row(pool: &SqlitePool, id: &str) -> (String, bool) {
+        sqlx::query_as("SELECT status, hidden FROM tasks WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    // The rule the user asked for: ticking the LAST subtask finishes the task.
+    #[tokio::test]
+    async fn last_subtask_completes_the_task() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, None).await;
+        let a = add_subtask_impl(&pool, &task_id, "раз").await.unwrap();
+        let b = add_subtask_impl(&pool, &task_id, "два").await.unwrap();
+
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        let (status, hidden) = task_row(&pool, &task_id).await;
+        assert_eq!(status, "Todo", "задача закрылась на первой из двух подзадач");
+        assert!(!hidden);
+
+        toggle_subtask_impl(&pool, &b.id).await.unwrap();
+        let (status, hidden) = task_row(&pool, &task_id).await;
+        assert_eq!(status, "Done", "последняя подзадача не закрыла задачу");
+        assert!(hidden, "закрытая задача должна уйти в историю");
+    }
+
+    // Unticking must not leave the task closed: the checklist is no longer complete.
+    #[tokio::test]
+    async fn unticking_does_not_complete() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, None).await;
+        let a = add_subtask_impl(&pool, &task_id, "раз").await.unwrap();
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        assert_eq!(task_row(&pool, &task_id).await.0, "Done");
+
+        // The task is in history now; unticking edits the checklist but must not
+        // itself reopen or re-close anything.
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        let subs = get_subtasks_impl(&pool, &task_id).await.unwrap();
+        assert!(!subs[0].done, "галочка не снялась");
+    }
+
+    // A task with no checklist has nothing to finish — the rule must not fire on an
+    // empty list, or every task without subtasks would be a candidate.
+    #[tokio::test]
+    async fn task_without_subtasks_is_untouched() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, None).await;
+        complete_if_all_subtasks_done(&pool, &task_id).await.unwrap();
+        assert_eq!(task_row(&pool, &task_id).await.0, "Todo");
+    }
+
+    // Deleting is not finishing. Removing the last unticked subtask leaves an
+    // all-ticked list, and closing the task there would be a destructive surprise.
+    #[tokio::test]
+    async fn deleting_the_last_undone_subtask_does_not_complete() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, None).await;
+        let a = add_subtask_impl(&pool, &task_id, "готова").await.unwrap();
+        let b = add_subtask_impl(&pool, &task_id, "не готова").await.unwrap();
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        assert_eq!(task_row(&pool, &task_id).await.0, "Todo");
+
+        delete_subtask_impl(&pool, &b.id).await.unwrap();
+        assert_eq!(
+            task_row(&pool, &task_id).await.0,
+            "Todo",
+            "удаление подзадачи закрыло задачу — удалять не значит выполнить"
+        );
+    }
+
+    // A recurring task closes its run the same way as a manual completion: it does
+    // not go to history but moves to the next deadline, and the checklist is
+    // cleared as the plan for the NEXT run (v0.9.24 behaviour, reached from here).
+    #[tokio::test]
+    async fn recurring_task_moves_to_next_run() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, Some(crate::core::task::Recurrence::Daily)).await;
+        // Two items: a one-item recurring checklist is deliberately excluded from
+        // auto-completion, see recurring_single_item_checklist_does_not_loop.
+        let a = add_subtask_impl(&pool, &task_id, "раз").await.unwrap();
+        let b = add_subtask_impl(&pool, &task_id, "два").await.unwrap();
+
+        toggle_subtask_impl(&pool, &b.id).await.unwrap();
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        let (_, hidden) = task_row(&pool, &task_id).await;
+        assert!(!hidden, "повторяющаяся задача не должна уходить в историю");
+
+        let subs = get_subtasks_impl(&pool, &task_id).await.unwrap();
+        assert!(
+            subs.iter().all(|s| !s.done),
+            "чек-лист повтора должен очиститься под следующий прогон"
+        );
+    }
+
+    // A blocked task cannot be completed (v0.9.56). Ticking its last subtask must
+    // still succeed as an edit — the block is about finishing, not about editing.
+    #[tokio::test]
+    async fn blocked_task_stays_open_but_the_tick_survives() {
+        let pool = test_pool().await;
+        let blocker = task_with(&pool, None).await;
+        let task_id = task_with(&pool, None).await;
+        crate::commands::dependencies::add_task_dependency_impl(&pool, &task_id, &blocker)
+            .await
+            .unwrap();
+
+        let a = add_subtask_impl(&pool, &task_id, "раз").await.unwrap();
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+
+        assert_eq!(
+            task_row(&pool, &task_id).await.0,
+            "Todo",
+            "заблокированная задача закрылась в обход зависимости"
+        );
+        let subs = get_subtasks_impl(&pool, &task_id).await.unwrap();
+        assert!(subs[0].done, "галочка потерялась из-за блокировки");
+    }
+
+    // The notification spam. Completing a repeat unticks the whole checklist, so on
+    // a ONE-item list the next tick is again "the last one" — and every round moved
+    // the deadline forward and cleared the notified_* flags, re-arming the
+    // scheduler. Auto-completion therefore skips single-item recurring checklists.
+    #[tokio::test]
+    async fn recurring_single_item_checklist_does_not_loop() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, Some(crate::core::task::Recurrence::Daily)).await;
+        let a = add_subtask_impl(&pool, &task_id, "шаг").await.unwrap();
+
+        let deadline_of = |pool: SqlitePool, id: String| async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT deadline FROM tasks WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        let before = deadline_of(pool.clone(), task_id.clone()).await;
+        for _ in 0..5 {
+            toggle_subtask_impl(&pool, &a.id).await.unwrap();
+            toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        }
+        let after = deadline_of(pool.clone(), task_id.clone()).await;
+        assert_eq!(
+            before, after,
+            "дедлайн повтора уехал от щёлканья одной галочки — это и есть спам уведомлений"
+        );
+
+        let flags: i64 = sqlx::query_scalar(
+            "SELECT notified_24h + notified_1h + notified_deadline FROM tasks WHERE id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(flags, 0, "флаги уведомлений сбрасывались по кругу");
+    }
+
+    // Two or more items still auto-complete: the reset unticks the others, so the
+    // user has to genuinely redo the work before it can close again.
+    #[tokio::test]
+    async fn recurring_multi_item_checklist_still_completes() {
+        let pool = test_pool().await;
+        let task_id = task_with(&pool, Some(crate::core::task::Recurrence::Daily)).await;
+        let a = add_subtask_impl(&pool, &task_id, "раз").await.unwrap();
+        let b = add_subtask_impl(&pool, &task_id, "два").await.unwrap();
+
+        let before: Option<String> = sqlx::query_scalar("SELECT deadline FROM tasks WHERE id = ?")
+            .bind(&task_id).fetch_one(&pool).await.unwrap();
+        toggle_subtask_impl(&pool, &a.id).await.unwrap();
+        toggle_subtask_impl(&pool, &b.id).await.unwrap();
+        let after: Option<String> = sqlx::query_scalar("SELECT deadline FROM tasks WHERE id = ?")
+            .bind(&task_id).fetch_one(&pool).await.unwrap();
+
+        assert_ne!(before, after, "повтор из двух пунктов не закрылся");
+        let subs = get_subtasks_impl(&pool, &task_id).await.unwrap();
+        assert!(subs.iter().all(|s| !s.done), "чек-лист не сброшен под следующий прогон");
     }
 }

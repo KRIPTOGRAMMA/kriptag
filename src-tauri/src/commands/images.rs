@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn saves_plain_base64_with_valid_ext() {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}", uuid::Uuid::new_v4()));
         let data = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
         let name = save_note_image_impl(&dir, &data, "png").unwrap();
         assert!(name.ends_with(".png"));
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn saves_data_url_prefixed_base64() {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}", uuid::Uuid::new_v4()));
         let data = format!(
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes")
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_extension() {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}", uuid::Uuid::new_v4()));
         let data = base64::engine::general_purpose::STANDARD.encode(b"x");
         let r = save_note_image_impl(&dir, &data, "exe");
         assert!(r.is_err());
@@ -90,14 +90,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_base64() {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}", uuid::Uuid::new_v4()));
         let r = save_note_image_impl(&dir, "not-base64!!!", "png");
         assert!(r.is_err());
     }
 
     #[test]
     fn extension_case_insensitive_and_dot_stripped() {
-        let dir = std::env::temp_dir().join(format!("ai-notes-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kriptag-test-{}", uuid::Uuid::new_v4()));
         let data = base64::engine::general_purpose::STANDARD.encode(b"x");
         let name = save_note_image_impl(&dir, &data, ".JPG").unwrap();
         assert!(name.ends_with(".jpg"));

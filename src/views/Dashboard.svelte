@@ -8,6 +8,8 @@
   import TaskOpener from "../lib/components/TaskOpener.svelte";
   import { t, tErr, i18n } from "../lib/i18n.svelte";
   import { localDateKey, pad2, localeTag } from "../lib/datetime";
+  import { formatMinutes } from "../lib/duration";
+  import { clampTipX } from "../lib/menuPos";
   import { loadUiState, saveUiState } from "../lib/uistate";
 
   // A task opens right on the dashboard, without leaving for the Tasks screen
@@ -150,6 +152,19 @@
   // --- The year in squares: completed tasks by local day ---
   const YEAR_DAYS = 365;
 
+  // "2026-08" from "2026-08-10". Grouping by the calendar month rather than by
+  // grid column on purpose: a column is a week, and a week straddles the month
+  // boundary at both ends, so highlighting whole columns would light up days
+  // belonging to the neighbouring month.
+  function monthKey(date: string): string {
+    return date.slice(0, 7);
+  }
+
+  // The month under the pointer, highlighted across the grid. Hovering the label
+  // is not enough on its own — it is a few characters wide, while the month it
+  // names covers about thirty squares — so the squares set it too.
+  let hoveredMonth: string | null = $state(null);
+
 
   const calendar = $derived.by(() => {
     const byDate = new Map(taskCompletions.map(c => [c.date, c.completed]));
@@ -163,11 +178,55 @@
     // Empty cells at the start so the week columns begin on Monday
     const first = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (YEAR_DAYS - 1));
     const lead = (first.getDay() + 6) % 7;
-    return { lead, days };
+    // Derived rather than a hardcoded 53 so the grid cannot spill into implicit
+    // columns, which are sized by a different rule than the explicit ones. For 365
+    // days this is always 53 — 365 = 52*7 + 1, so even a 6-cell lead still fits the
+    // last column — but that is a property of YEAR_DAYS, not something the layout
+    // should assume.
+    const cols = Math.ceil((lead + days.length) / 7);
+
+    // A label for each month, in the column holding its first day. The month name
+    // comes from Intl rather than the dictionary: it follows the chosen language
+    // without 12 entries per locale. (The weekday labels beside the grid go the
+    // other way and sit in the dictionary — three letters each, and they have to
+    // be abbreviated to a fixed width that Intl does not guarantee.)
+    //
+    // A month whose label would crowd the previous one is skipped: the year starts
+    // mid-month, so its first label can describe only two or three squares.
+    const MIN_COLS_BETWEEN = 3;
+    const fmt = new Intl.DateTimeFormat(localeTag(i18n.lang), { month: "short" });
+    const months: { col: number; label: string; key: string }[] = [];
+    for (let i = 0; i < days.length; i++) {
+      const d = new Date(days[i].date + "T00:00:00");
+      if (d.getDate() !== 1) continue;
+      const col = Math.floor((lead + i) / 7);
+      const prev = months[months.length - 1];
+      if (prev && col - prev.col < MIN_COLS_BETWEEN) continue;
+      months.push({ col, label: fmt.format(d), key: monthKey(days[i].date) });
+    }
+    return { lead, days, cols, months };
   });
 
   const calMax = $derived(Math.max(1, ...taskCompletions.map(c => c.completed)));
   const CAL_MIX = [0, 25, 45, 70, 95]; // accent percentages per level
+
+  // The three counters above the grid. All of them come from taskCompletions,
+  // which is already loaded for the heatmap — the Dashboard deliberately does not
+  // pull in taskStore, which would fetch the whole task list for three numbers.
+  const tiles = $derived.by(() => {
+    const byDate = new Map(taskCompletions.map(c => [c.date, c.completed]));
+    const now = new Date();
+    const today = byDate.get(localDateKey(now)) ?? 0;
+
+    let week = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      week += byDate.get(localDateKey(d)) ?? 0;
+    }
+
+    const best = Math.max(0, ...taskCompletions.map(c => c.completed));
+    return { today, week, best };
+  });
 
   function calLevel(count: number): number {
     if (count <= 0) return 0;
@@ -198,12 +257,30 @@
     return completions;
   }
 
+  // The tooltip's width, mirroring max-width in .cal-tip. Needed here because the
+  // clamp happens before the element exists, so it cannot be measured.
+  const CAL_TIP_W = 280;
+  // An upper bound for the flip decision, mirroring max-height in .cal-tip. The
+  // real height is unknown before the element renders, and a day with many tasks
+  // is the case that would otherwise open downwards off the screen.
+  const CAL_TIP_MAX_H = 180;
+  let calWrapEl: HTMLDivElement | undefined = $state();
+
   async function showCalTip(e: MouseEvent, day: { date: string; count: number }) {
     const cell = e.currentTarget as HTMLElement;
-    const x = cell.offsetLeft;
-    const y = cell.offsetTop;
+    // Viewport coordinates: the tooltip is position:fixed at the top level, not
+    // inside .cal-wrap, so it is clamped against the window rather than the panel.
+    // A hardcoded ceiling of 640px used to park it mid-panel for every cell to the
+    // right of that.
+    const r = cell.getBoundingClientRect();
+    const x = clampTipX(r.left, CAL_TIP_W, window.innerWidth);
+    // Below the square by default, above it when there is no room underneath —
+    // the year block sits low on the dashboard, so the last rows are near the
+    // bottom of the window.
+    const below = r.bottom + 8;
+    const y = below + CAL_TIP_MAX_H > window.innerHeight ? r.top - CAL_TIP_MAX_H - 8 : below;
     const completions = await loadDayCompletions(day);
-    calTip = { date: day.date, count: day.count, completions, x, y };
+    calTip = { date: day.date, count: day.count, completions, x, y: Math.max(8, y) };
   }
 
   async function openCalPopup(day: { date: string; count: number }) {
@@ -222,6 +299,12 @@
   }
 
   // --- The "hour x weekday" heatmap ---
+  // The activity list opens on the last few days. Thirty rows of a bar chart is a
+  // wall that pushes everything below it off the screen, and the recent days are
+  // the ones actually read.
+  const ACTIVITY_COLLAPSED = 5;
+  let activityExpanded = $state(false);
+
   let hourly: { weekday: number; hour: number; minutes: number }[] = $state([]);
   const HOURS = Array.from({ length: 24 }, (_, i) => i);
   const WEEKDAY_LABELS = $derived([t("Пн"), t("Вт"), t("Ср"), t("Чт"), t("Пт"), t("Сб"), t("Вс")]);
@@ -336,6 +419,21 @@
     <div class="alert">{error}</div>
   {/if}
 
+  <div class="tiles">
+    <div class="tile">
+      <div class="tile-n">{tiles.today}</div>
+      <div class="tile-l">{t("Сегодня")}</div>
+    </div>
+    <div class="tile">
+      <div class="tile-n">{tiles.week}</div>
+      <div class="tile-l">{t("За неделю")}</div>
+    </div>
+    <div class="tile">
+      <div class="tile-n">{tiles.best}</div>
+      <div class="tile-l">{t("Лучший день")}</div>
+    </div>
+  </div>
+
   <div class="grid">
     <!-- The donut by category -->
     <section class="card panel">
@@ -393,7 +491,7 @@
                 {#if row.value === null}
                   {t("нет данных")}
                 {:else}
-                  {t("{pct}% актив · {mins} мин", { pct: row.value, mins: Math.round(row.active / 60) })}
+                  {t("{pct}% актив · {dur}", { pct: row.value, dur: formatMinutes(row.active / 60, t) })}
                 {/if}
               </span>
             </div>
@@ -407,7 +505,6 @@
       {/if}
     </section>
 
-    <!-- The AI insight -->
     <section class="card panel">
       <h3 class="section-title">{t("ИИ-инсайт")}</h3>
 
@@ -435,26 +532,29 @@
     {#if pomodoroStats}
       <section class="card panel">
         <h3 class="section-title">{t("Помодоро")}</h3>
-        <ul class="goals">
-          <li class="goal-item">
-            <div class="goal-row">
-              <span class="goal-metric">{t("сегодня")}</span>
-              <span class="goal-val muted">{pomodoroStats.today}</span>
-            </div>
-            <div class="goal-row">
-              <span class="goal-metric">{t("за неделю")}</span>
-              <span class="goal-val muted">{pomodoroStats.week}</span>
-            </div>
-            <div class="goal-row">
-              <span class="goal-metric">{t("стрик задач")}</span>
-              <span class="goal-val muted">{t("{n} дн.", { n: pomodoroStats.task_streak })}</span>
-            </div>
-            <div class="goal-row">
-              <span class="goal-metric">{t("стрик помидоров")}</span>
-              <span class="goal-val muted">{t("{n} дн.", { n: pomodoroStats.pomodoro_streak })}</span>
-            </div>
-          </li>
-        </ul>
+        <!-- Its own rows rather than .goal-row: that layout is built around a
+             .track bar taking flex:1 between the label and the value. With no bar
+             to absorb the slack, a fixed 48px label and a 52px value left the
+             whole panel empty to the right. Here the label and the value are
+             pushed to opposite edges. -->
+        <dl class="stat-rows">
+          <div class="stat-row">
+            <dt>{t("сегодня")}</dt>
+            <dd>{pomodoroStats.today}</dd>
+          </div>
+          <div class="stat-row">
+            <dt>{t("за неделю")}</dt>
+            <dd>{pomodoroStats.week}</dd>
+          </div>
+          <div class="stat-row">
+            <dt>{t("стрик задач")}</dt>
+            <dd>{t("{n} дн.", { n: pomodoroStats.task_streak })}</dd>
+          </div>
+          <div class="stat-row">
+            <dt>{t("стрик помидоров")}</dt>
+            <dd>{t("{n} дн.", { n: pomodoroStats.pomodoro_streak })}</dd>
+          </div>
+        </dl>
       </section>
     {/if}
 
@@ -540,7 +640,7 @@
                 <span class="goal-name">{pt.name}</span>
               </div>
               <div class="goal-row">
-                <span class="goal-val muted">{t("{n} мин", { n: pt.mins })}</span>
+                <span class="goal-val muted">{formatMinutes(pt.mins, t)}</span>
               </div>
             </li>
           {/each}
@@ -565,7 +665,7 @@
               <div class="track tall">
                 <div class="fill" style="width:{Math.round((d.minutes / maxDomain) * 100)}%;"></div>
               </div>
-              <span class="bar-val">{t("{n} мин", { n: d.minutes })}</span>
+              <span class="bar-val">{formatMinutes(d.minutes, t)}</span>
             </div>
           {/each}
         </div>
@@ -592,7 +692,7 @@
                 <div class="track tall">
                   <div class="fill" style="width:{Math.round((a.minutes / maxApp) * 100)}%;"></div>
                 </div>
-                <span class="bar-val">{t("{n} мин", { n: a.minutes })}</span>
+                <span class="bar-val">{formatMinutes(a.minutes, t)}</span>
               </div>
             {/each}
           </div>
@@ -602,7 +702,7 @@
               <li>
                 <span class="swatch" style="background:var(--cat-{c.category.toLowerCase()});"></span>
                 <span>{CATEGORY_LABELS[c.category] ?? c.category}</span>
-                <span class="muted">{t("{n} мин", { n: c.minutes })}</span>
+                <span class="muted">{formatMinutes(c.minutes, t)}</span>
               </li>
             {/each}
           </ul>
@@ -621,18 +721,34 @@
       {#if activityDays.length === 0}
         <div class="empty">{t("Нет данных")}</div>
       {:else}
-        {@const max = maxMinutes(activityDays)}
+        {@const shown = activityDays.slice(-30)}
+        <!-- The scale stays tied to the full 30 days, not to what is on screen:
+             if it followed the collapsed slice, expanding would rescale every bar
+             already visible and the same day would look busier collapsed than
+             expanded. -->
+        {@const max = maxMinutes(shown)}
         <div class="rows">
-          {#each activityDays.slice(-30) as day (day.date)}
+          {#each activityExpanded ? shown : shown.slice(-ACTIVITY_COLLAPSED) as day (day.date)}
             <div class="bar-row">
               <span class="bar-date">{day.date}</span>
               <div class="track tall">
                 <div class="fill" style="width:{Math.round((day.minutes / max) * 100)}%;"></div>
               </div>
-              <span class="bar-val">{t("{n} мин", { n: day.minutes })}</span>
+              <span class="bar-val">{formatMinutes(day.minutes, t)}</span>
             </div>
           {/each}
         </div>
+        {#if shown.length > ACTIVITY_COLLAPSED}
+          <button
+            class="btn-ghost btn-sm activity-more"
+            aria-expanded={activityExpanded}
+            onclick={() => activityExpanded = !activityExpanded}
+          >
+            {activityExpanded
+              ? t("Свернуть список")
+              : t("Показать все ({n})", { n: shown.length })}
+          </button>
+        {/if}
       {/if}
     </section>
 
@@ -643,8 +759,44 @@
       {#if taskCompletions.length === 0}
         <div class="empty">{t("Нет данных")}</div>
       {:else}
-        <div class="cal-wrap" onmouseleave={() => calTip = null} role="presentation">
-          <div class="cal-grid">
+        <div
+          class="cal-wrap"
+          bind:this={calWrapEl}
+          onmouseleave={() => { calTip = null; hoveredMonth = null; }}
+          role="presentation"
+        >
+          <!-- Month labels. Each sits in the column where its month starts, so the
+               label lines up with the first square of that month. aria-hidden: the
+               squares already carry a full date in aria-label, and a screen reader
+               reading a row of month names on its own would only add noise. -->
+          <div class="cal-months" style="--cal-cols: {calendar.cols}" aria-hidden="true">
+            {#each calendar.months as m (m.col)}
+              <!-- +2, not +1: column 1 is the weekday-label gutter.
+                   Hovering the name outlines that month across the grid. It stays a
+                   span rather than becoming a button: this row is aria-hidden, and a
+                   focusable control inside hidden content is reachable by keyboard
+                   while being unreadable by a screen reader. The squares below are
+                   the accessible path — they are real buttons, each with its date. -->
+              <span
+                class="cal-month"
+                class:on={hoveredMonth === m.key}
+                style="grid-column: {m.col + 2}"
+                onmouseenter={() => hoveredMonth = m.key}
+                role="presentation"
+              >{m.label}</span>
+            {/each}
+          </div>
+          <div class="cal-grid" style="--cal-cols: {calendar.cols}">
+            <!-- Weekday labels, one gutter column before the year. Only every other
+                 day is named: at this cell size seven stacked labels collide, and
+                 Mon/Wed/Fri is enough to count off the rows in between. The blanks
+                 are still rendered so each label keeps its own grid row.
+                 aria-hidden, like the month row: every square already carries its
+                 full date in aria-label, so read aloud these would only be noise. -->
+            {#each WEEKDAY_LABELS as label, row (label)}
+              <span class="cal-wd" style="grid-area: {row + 1} / 1" aria-hidden="true"
+                >{row % 2 === 0 ? label : ""}</span>
+            {/each}
             {#each Array(calendar.lead) as _, i (i)}
               <span class="cal-cell lead"></span>
             {/each}
@@ -652,25 +804,20 @@
               <button
                 type="button"
                 class="cal-cell"
+                class:on={hoveredMonth === monthKey(day.date)}
                 data-date={day.date}
                 data-count={day.count}
+                data-month={monthKey(day.date)}
                 style={day.count > 0
                   ? `background: color-mix(in srgb, var(--accent) ${CAL_MIX[calLevel(day.count)]}%, transparent);`
                   : ""}
-                onmouseenter={(e) => showCalTip(e, day)}
+                onmouseenter={(e) => { hoveredMonth = monthKey(day.date); showCalTip(e, day); }}
+                onfocus={() => hoveredMonth = monthKey(day.date)}
                 onclick={() => openCalPopup(day)}
                 aria-label="{fmtDay(day.date)}: {day.count}"
               ></button>
             {/each}
           </div>
-          {#if calTip}
-            <div class="cal-tip" style="left:{Math.min(calTip.x, 640)}px; top:{calTip.y + 16}px;">
-              <div class="cal-tip-head">{fmtDay(calTip.date)} — {calTip.count > 0 ? t("выполнено: {n}", { n: calTip.count }) : t("пусто")}</div>
-              {#each calTip.completions as c (c.id)}
-                <div class="cal-tip-item">• {c.title}</div>
-              {/each}
-            </div>
-          {/if}
         </div>
       {/if}
     </section>
@@ -690,7 +837,7 @@
               <span
                 class="heat-cell"
                 style={heatStyle(mins)}
-                title="{label} {pad2(h)}:00 — {t('{n} мин', { n: mins })}"
+                title="{label} {pad2(h)}:00 — {formatMinutes(mins, t)}"
               ></span>
             {/each}
           {/each}
@@ -705,6 +852,19 @@
 </div>
 
 <svelte:window onkeydown={handleKeydown} />
+
+<!-- Outside .cal-wrap on purpose. While it lived inside, a tooltip near the right
+     edge stuck out of a box with overflow-x: auto, and the panel grew a scrollbar
+     for content nobody scrolls. Here it is fixed to the viewport, so it can hang
+     over the panel's edge like the popup below already does. -->
+{#if calTip}
+  <div class="cal-tip" style="left:{calTip.x}px; top:{calTip.y}px;">
+    <div class="cal-tip-head">{fmtDay(calTip.date)} — {calTip.count > 0 ? t("выполнено: {n}", { n: calTip.count }) : t("пусто")}</div>
+    {#each calTip.completions as c (c.id)}
+      <div class="cal-tip-item">• {c.title}</div>
+    {/each}
+  </div>
+{/if}
 
 {#if calPopup}
   <div role="dialog" aria-modal="true" class="overlay backdrop" onclick={(e) => { if (e.target === e.currentTarget) calPopup = null; }}>
@@ -733,14 +893,24 @@
 {/if}
 
 <style>
+  /* Wider than a text column and centred: the panels here are charts, and a
+     chart gains from width where a paragraph loses. */
   .dash {
-    max-width: 860px;
+    max-width: 1200px;
+    margin: 0 auto;
   }
 
   .grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+  }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 12px;
   }
 
   .panel {
@@ -752,8 +922,30 @@
     grid-column: 1 / -1;
   }
 
+  /* A half-width panel with nothing beside it stretches across instead of leaving
+     a hole.
+     The case: an odd number of narrow panels followed by a wide one. The wide
+     panel cannot share a row, so the last narrow one is left alone with the whole
+     right half empty — measured with "Резюме" sitting there down to the next wide
+     panel. The count is not fixed either: goals, project time, apps and sites are
+     conditional, so which panel lands last depends on the data.
+
+     grid-auto-flow: dense was tried first and does nothing here — it back-fills a
+     hole with a LATER item that fits, and every later panel is wide. Marking the
+     panel itself is the only thing that works.
+
+     :has() rather than a count in the markup: the panels come from several
+     independent {#if} blocks, and counting in Svelte would mean duplicating every
+     one of those conditions. */
+  .grid > .panel:not(.wide):has(+ .panel.wide) {
+    grid-column: 1 / -1;
+  }
+
   @media (max-width: 720px) {
     .grid { grid-template-columns: 1fr; }
+    /* Two-up rather than one: the tiles are short, and stacking all three would
+       push the panels below the fold on a narrow window. */
+    .tiles { grid-template-columns: 1fr 1fr; }
   }
 
   /* The year in squares: columns are weeks, rows run Monday to Sunday */
@@ -761,32 +953,157 @@
     position: relative;
     overflow-x: auto;
     padding-bottom: 4px;
+    /* Width of the weekday-label gutter, shared by the month row and the grid so
+       their columns stay in step. Wide enough for the longest label at 10px. */
+    --cal-gutter: 22px;
+    /* Thickness of the hovered month's ring. Tied to the window rather than fixed:
+       the square measures ~19px on a wide window but ~6px on a narrow one, where a
+       thick ring covers most of the fill and the shade of the square — the thing
+       the heatmap exists to show — stops being readable.
+
+       Whole pixels only. A 1.5px value was tried first and is not achievable: at
+       devicePixelRatio 1 the engine floors outline-width to whole pixels, so it
+       computed to 1px and the wide window silently kept the thin ring. */
+    --cal-ring: 1px;
   }
 
+  /* A viewport media query, not a container query: nothing in the ancestor chain
+     declares container-type, so a container query here would silently never
+     match. 900px is where the measured cell passes ~10px and can carry 2px. */
+  @media (min-width: 900px) {
+    .cal-wrap { --cal-ring: 2px; }
+  }
+
+  /* One row of month names on the same column track as the grid below, so a label
+     sits exactly above the first square of its month. */
+  .cal-months {
+    display: grid;
+    /* The leading gutter is a fixed width shared with .cal-grid below rather than
+       `auto`: auto would size to this row's own content, which is empty here and a
+       three-letter label there, and the two tracks would drift apart — putting
+       every month name a couple of columns off its square. */
+    grid-template-columns: var(--cal-gutter) repeat(var(--cal-cols, 53), minmax(0, 1fr));
+    gap: 2px;
+    margin-bottom: 3px;
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+
+  .cal-month {
+    /* The name is wider than one column, so it is allowed to run over the
+       following ones instead of being squeezed or clipped. */
+    white-space: nowrap;
+    grid-row: 1;
+    /* Only as wide as the word: the element stretches across several columns by
+       default, and a stretched one would swallow hovers meant for its neighbour. */
+    justify-self: start;
+    cursor: default;
+    transition: color 120ms ease;
+  }
+
+  .cal-month.on {
+    color: var(--accent);
+    font-weight: 650;
+  }
+
+  /* The columns are sized by the grid, not by arithmetic in a custom property.
+     An earlier attempt put clamp(10px, calc((100% - ...) / 53), 16px) in a
+     variable and fed it to grid-template-rows: a percentage there resolves
+     against the block axis, whose height is indefinite, so every cell collapsed
+     and the year became a thin stripe.
+
+     Columns carry the width, aspect-ratio makes the cell square, and the row
+     height follows from that. 53 columns for a full year. */
   .cal-grid {
     display: grid;
     grid-auto-flow: column;
-    grid-template-rows: repeat(7, 10px);
+    /* The count comes from the data (--cal-cols) so no cell can land in an
+       implicit column, which would be sized by a different rule.
+
+       The track is 1fr with no bound in either direction, so the year always spans
+       exactly its panel. A floor (10px) made the grid wider than the panel on a
+       narrow window and produced a horizontal scrollbar; a ceiling (16px) left
+       slack on a wide one, which is the empty space this block started out with.
+       Squareness comes from aspect-ratio on the cell, so a wider column simply
+       makes a bigger square. */
+    grid-template-columns: var(--cal-gutter) repeat(var(--cal-cols, 53), minmax(0, 1fr));
+    grid-template-rows: repeat(7, auto);
     gap: 2px;
-    width: max-content;
+  }
+
+  .cal-wd {
+    /* Right-aligned against the first square, and vertically centred on its row —
+       the row's height comes from the square's aspect-ratio, which is taller than
+       a 10px line. */
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 2px;
+    font-size: 10px;
+    /* The row height comes from the square's aspect-ratio, and on a narrow window
+       a square is smaller than a 10px line. Without this the label's line box
+       becomes the taller of the two and sets a floor on the row: measured at a
+       700px viewport the squares stayed 6px while the rows stayed 12, so the
+       vertical gaps grew to three times the horizontal ones and the year looked
+       stretched. Zero height with overflow visible lets the text keep its size
+       while the row follows the squares; the labels stay legible because they are
+       centred on rows that are only every other one. */
+    height: 0;
+    line-height: 0;
+    overflow: visible;
+    color: var(--text-secondary);
+    white-space: nowrap;
   }
 
   .cal-cell {
-    width: 10px;
-    height: 10px;
+    /* No width/height: the column gives the width and the ratio gives the height.
+       min-width:0 lets a button shrink below its intrinsic size — without it the
+       default min-width:auto would keep the track from ever reaching 10px. */
+    min-width: 0;
+    aspect-ratio: 1;
     border-radius: 2px;
     background: var(--bg-secondary);
     border: none;
     padding: 0;
     cursor: pointer;
+    transition: outline-color 120ms ease;
+    /* Longhands, not the `outline` shorthand: with the shorthand the width came
+       out 1px even where --cal-ring resolved to 1.5px, because the shorthand
+       resolves its parts once at this declaration and the media query below only
+       redefines the variable. Declared transparent rather than left unset so the
+       transition has a from-value and the ring fades in instead of jumping. */
+    outline-style: solid;
+    outline-width: var(--cal-ring);
+    outline-color: transparent;
+    outline-offset: 0;
+  }
+
+  /* Every square of the hovered month is ringed. Deliberately not a background
+     wash or a band behind the whole month: the grid runs in week columns, and a
+     month starts and ends mid-week, so any rectangle spanning whole columns would
+     also cover days of the neighbouring month. A per-square ring is the only
+     treatment that matches the month exactly. */
+  .cal-cell.on {
+    outline-color: var(--accent);
+    /* Above its neighbours so the ring is not overdrawn by the next square's
+       background, which would nick the shared edges. */
+    position: relative;
+    z-index: 1;
   }
 
   .cal-cell.lead { background: transparent; }
 
   .cal-tip {
-    position: absolute;
-    z-index: 5;
+    /* fixed, not absolute: the element is rendered at the top level so it can
+       overhang the panel instead of forcing .cal-wrap to scroll. */
+    position: fixed;
+    /* Above the panels but below the modal overlay. */
+    z-index: 50;
     max-width: 280px;
+    /* Keep CAL_TIP_MAX_H in sync — the flip decision is made against that number
+       before the element exists to be measured. */
+    max-height: 180px;
+    overflow: hidden;
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -936,7 +1253,49 @@
   .goal-val {
     font-size: 11px;
     min-width: 52px;
+    /* min-width (not width) already lets this grow past 52px for the hour form,
+       but nowrap keeps "4 ч 32 мин" on one line if the row ever runs short. */
+    white-space: nowrap;
     text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* Label/value rows that fill their panel: a dotted rule carries the eye across
+     the gap, so a wide container reads as deliberate rather than as a layout that
+     ran out of content. */
+  .stat-rows {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .stat-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .stat-row dt {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  /* The leader: an empty flex-1 element with a bottom border. */
+  .stat-row::before {
+    content: "";
+    order: 1;
+    flex: 1;
+    border-bottom: 1px dotted var(--border);
+    transform: translateY(-3px);
+  }
+
+  .stat-row dd {
+    order: 2;
+    margin: 0;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
 
@@ -987,6 +1346,11 @@
     font-size: 12px;
   }
 
+  .activity-more {
+    margin-top: 8px;
+    color: var(--text-secondary);
+  }
+
   .bar-date {
     width: 78px;
     color: var(--text-secondary);
@@ -994,7 +1358,11 @@
   }
 
   .bar-val {
-    width: 52px;
+    /* Wide enough for "12 ч 34 мин" and non-wrapping. At the old 52px, sized for
+       a bare "384 мин", the hour form broke onto a second line and pushed the
+       rows out of alignment. */
+    width: 76px;
+    white-space: nowrap;
     text-align: right;
     color: var(--text-secondary);
   }

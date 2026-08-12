@@ -190,9 +190,9 @@ pub(crate) fn local_model_available(app: &AppHandle) -> bool {
 }
 
 // The path to the model file, shown in Settings. It used to be hardcoded in the
-// UI as `~/.local/share/ai-notes/models/model.gguf`, which was wrong on
+// UI as `~/.local/share/kriptag/models/model.gguf`, which was wrong on
 // Windows/macOS and wrong even on Linux (the directory is named after the
-// identifier, com.ainotes.app, not ai-notes). We return what models_dir actually
+// identifier, com.kriptag.app, not kriptag). We return what models_dir actually
 // uses instead of assembling a per-OS string in the frontend: a platform
 // substitution there would drift from the backend at the first change.
 #[tauri::command]

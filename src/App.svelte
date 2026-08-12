@@ -202,9 +202,8 @@
   />
 {:else}
 <div class="shell">
-  <div class="accent-thread" aria-hidden="true"></div>
   <aside class="sidebar">
-    <div class="brand">AI Notes</div>
+    <div class="brand">KRIPTAG</div>
 
     <nav class="nav">
       {#each NAV as item (item.view)}
@@ -301,23 +300,6 @@
     height: 100vh;
   }
 
-  /* The only place both accents are shown together across the full width, so it
-     sets the tone without recolouring anything. Fixed rather than a child of the
-     titlebar: that one is transparent and floats over the content with
-     pointer-events:none, so an ::after on it would hang in mid-content. It fades
-     out instead of running colour to the right edge, where the window buttons
-     are — a hard stop under them would read as an underline for the buttons. */
-  .accent-thread {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    z-index: 61;
-    pointer-events: none;
-    background: linear-gradient(90deg, var(--accent), var(--accent-secondary) 55%, transparent);
-  }
-
   .sidebar {
     width: 176px;
     flex-shrink: 0;
@@ -326,14 +308,46 @@
     gap: 2px;
     padding: 10px 8px;
     background: var(--bg-secondary);
-    border-right: 1px solid var(--border);
+    /* The border is drawn by ::after below, not by border-right: the edge here
+       carries the accent thread, and a border cannot hold a gradient. */
+    position: relative;
   }
 
+  /* The one place both accents are shown together along their full length. It
+     lives on the sidebar's edge because that is the only boundary in this window
+     that actually exists — the title bar is transparent and floats over the
+     content, so a thread under it would cross the text (learned the hard way).
+     Fades out towards the bottom instead of stopping dead: the lower half of the
+     sidebar is empty, and a hard end there would read as an unfinished line. */
+  .sidebar::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 2px;
+    pointer-events: none;
+    background: linear-gradient(
+      180deg,
+      var(--accent),
+      var(--accent-secondary) 55%,
+      var(--border)
+    );
+  }
+
+  /* The wordmark. Written out in capitals in the markup rather than set with
+     text-transform: the bundled face carries only the seven letters of KRIPTAG,
+     so a lowercase source string would have no glyphs to render.
+
+     Space Grotesk is already wide and squared off, so the tracking is small —
+     the .08em that a system font needs to read as a wordmark would pull these
+     letters apart. */
   .brand {
-    font-size: 13px;
+    font-family: "Kriptag Wordmark", system-ui, sans-serif;
+    font-size: 15px;
     font-weight: 700;
     padding: 4px 10px 12px 10px;
-    letter-spacing: .02em;
+    letter-spacing: .04em;
   }
 
   .nav {
@@ -411,6 +425,21 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px 20px;
+    /* Content starts below the window buttons, which float over the top-right
+       corner (WindowControls is position:fixed and transparent).
+       Previously every view kept clear of them on its own: a padding-right on
+       each header, plus a clip-path notch in the notes card, which is the only
+       view whose root is a filled panel. The notch cut a visible step out of the
+       card's rounded corner — it read as damage rather than design, which is what
+       prompted this. One rule here replaces all of that: the strip belongs to the
+       titlebar, so nothing paints into it and nothing has to work around it.
+
+       32px is the titlebar's height, but the buttons inside it are 24px and
+       vertically centred, so they end at y=28 and the last 4px are empty. The
+       content is pulled up to just below the buttons themselves rather than below
+       the whole bar: on a filled panel like the notes card those 4px read as a
+       gap above the panel, not as breathing room. */
+    padding-top: 32px;
   }
 
   .banner {

@@ -210,6 +210,8 @@ export interface AppSettings {
   color_bg: string;
   color_bg_secondary: string; // the sidebar and second-plane surfaces (--bg-secondary)
   color_bg_hover: string; // the hover fill of rows and ghost buttons (--bg-hover)
+  color_bg_card: string; // cards, buttons, task rows (--bg-card)
+  color_text_secondary: string; // captions, dates, counters (--text-secondary)
   color_text: string;
   color_border: string;
   quiet_until: string; // RFC3339; empty means off; a distant date means indefinite
@@ -217,6 +219,7 @@ export interface AppSettings {
   ai_fallback: boolean;
   openai_in_keyring: boolean;
   anthropic_in_keyring: boolean;
+  custom_theme_presets: string; // JSON [{name, colors:{color_*}}] — user-saved colour sets
   app_category_rules: string; // JSON [{pattern, category}]
   app_limits: string;         // JSON [{category, daily_mins}] — 0 or absence means no limit
   auto_backup_dir: string;    // empty means automatic backup is off

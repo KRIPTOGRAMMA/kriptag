@@ -183,3 +183,43 @@ export function toggleLine(raw: string, index: number): string {
   }
   return lines.join("\n");
 }
+
+// Moves the line at `index` (counted as in parseChecklist) to the end of the
+// document, so a ticked subtask sinks below the ones still to do.
+//
+// Called only from the checkbox click, never while typing: this is a single text
+// document, and reordering on every edit would slide a line out from under the
+// caret mid-word. Ticking with the mouse is a deliberate, discrete act, and the
+// user is looking at the list rather than typing into it.
+//
+// Empty and unfinished lines stay where they are — they are what the user is in
+// the middle of writing, and only the moved line changes position.
+export function moveLineToEnd(raw: string, index: number): string {
+  const lines = raw.split("\n");
+  let seen = -1;
+  let from = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = LINE_RE.exec(lines[i]);
+    const title = (m ? m[2] : lines[i]).trim();
+    if (!title) continue;
+    seen++;
+    if (seen === index) { from = i; break; }
+  }
+  if (from === -1) return raw;
+
+  // The last line that counts as a subtask. Anything after it is a trailing empty
+  // line the user is about to type into, and the moved line goes above it rather
+  // than below — otherwise the caret's line would end up under the completed one.
+  let lastReal = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = LINE_RE.exec(lines[i]);
+    if ((m ? m[2] : lines[i]).trim()) { lastReal = i; break; }
+  }
+  const [moved] = lines.splice(from, 1);
+  // lastReal needs no adjustment: removing a line above it shifts it down by one,
+  // which is exactly the position the moved line has to take. When the line was
+  // already last, that lands it back where it started and the text is unchanged —
+  // no special case needed for it.
+  lines.splice(lastReal, 0, moved);
+  return lines.join("\n");
+}

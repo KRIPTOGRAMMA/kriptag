@@ -35,7 +35,7 @@ pub fn start_triggers(app: tauri::AppHandle, pool: SqlitePool, work_mode: Arc<Mu
                     &app,
                     &pool,
                     "overdue",
-                    "AI Notes",
+                    "Kriptag",
                     &format!("Просроченных задач уже {}. Загляни в список и разбери завалы.", count),
                 ).await;
                 let _ = set_setting(&pool, "last_overdue_notify", &today).await;
@@ -52,7 +52,7 @@ pub fn start_triggers(app: tauri::AppHandle, pool: SqlitePool, work_mode: Arc<Mu
                         &app,
                         &pool,
                         "missed_days",
-                        "AI Notes",
+                        "Kriptag",
                         &format!("Уже {} дн. подряд задачи остаются несделанными. Может, пересмотреть план?", streak),
                     ).await;
                     let _ = set_setting(&pool, "last_missed_notify", &today).await;

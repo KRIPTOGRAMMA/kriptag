@@ -57,7 +57,7 @@ pub async fn stop_voice_recording(
         slot.take().ok_or("Запись не была начата.")?
     };
 
-    let wav = std::env::temp_dir().join(format!("ai-notes-voice-{}.wav", uuid::Uuid::new_v4()));
+    let wav = std::env::temp_dir().join(format!("kriptag-voice-{}.wav", uuid::Uuid::new_v4()));
     recording.stop_to_wav(&wav)?;
 
     let result = crate::voice::transcribe(&app, &wav).await;

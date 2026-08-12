@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Task, CreateTaskPayload, UpdateTaskPayload, Priority, Category, Recurrence, RecurrenceUnit, TaskStatus, ChecklistTemplate } from "../types";
   import ChecklistEditor from "./ChecklistEditor.svelte";
+  import Select from "./Select.svelte";
   import { parseChecklist, formatChecklist } from "../checklistText";
   import { api } from "../api/tauri";
   import { projectStore } from "../stores/projects.svelte";
@@ -41,11 +42,10 @@
     ),
   );
 
-  async function addBlocker(select: HTMLSelectElement) {
-    const blockerId = select.value;
-    // Reset immediately: picking an option is an action rather than field state, or
-    // the already-added blocker would stay showing in the select.
-    select.value = "";
+  // Takes the id rather than the element: the control is a Select component now,
+  // and there is no field to reset — it is bound to a constant "", so it always
+  // shows the placeholder and never displays an already-added blocker.
+  async function addBlocker(blockerId: string) {
     if (!blockerId || !task) return;
     await taskStore.addDependency(task.id, blockerId);
     blockedBy = taskStore.tasks.find(x => x.id === task!.id)?.blocked_by ?? [];
@@ -291,6 +291,12 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // A belt-and-braces guard for controls that handle a key themselves. The
+    // dropdown's own stopPropagation already keeps Escape from reaching this
+    // window listener, so nothing currently depends on this line — it is here so
+    // that a control which only calls preventDefault does not close the modal and
+    // lose unsaved edits.
+    if (e.defaultPrevented) return;
     if (e.key === "Escape") onClose();
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") handleSave();
   }
@@ -362,23 +368,31 @@
     </div>
 
     <div class="pair">
-      <label class="field">
+      <!-- A <div>, not a <label>: the control is a button now, and a label wrapping
+           a button would toggle the dropdown on every click of the caption. -->
+      <div class="field">
         <span class="label">{t("Приоритет")}</span>
-        <select bind:value={priority}>
-          <option value="Low">{t("Низкий")}</option>
-          <option value="Medium">{t("Средний")}</option>
-          <option value="High">{t("Высокий")}</option>
-          <option value="Critical">{t("Критический")}</option>
-        </select>
-      </label>
-      <label class="field">
+        <Select
+          value={priority}
+          onChange={(v) => (priority = v as Priority)}
+          ariaLabel={t("Приоритет")}
+          options={[
+            { value: "Low", label: t("Низкий") },
+            { value: "Medium", label: t("Средний") },
+            { value: "High", label: t("Высокий") },
+            { value: "Critical", label: t("Критический") },
+          ]}
+        />
+      </div>
+      <div class="field">
         <span class="label">{t("Категория")}</span>
-        <select bind:value={category}>
-          {#each categoryStore.categories as c (c.id)}
-            <option value={c.id}>{categoryStore.name(c.id)}</option>
-          {/each}
-        </select>
-      </label>
+        <Select
+          value={category}
+          onChange={(v) => (category = v as Category)}
+          ariaLabel={t("Категория")}
+          options={categoryStore.categories.map(c => ({ value: c.id, label: categoryStore.name(c.id) }))}
+        />
+      </div>
     </div>
 
     {#if isEdit && totalTaskMins > 0}
@@ -389,14 +403,15 @@
     {/if}
 
     {#if isEdit}
-      <label class="field">
+      <div class="field">
         <span class="label">{t("Статус")}</span>
-        <select bind:value={status}>
-          {#each statusStore.statuses as s (s.id)}
-            <option value={s.id}>{statusStore.name(s.id)}</option>
-          {/each}
-        </select>
-      </label>
+        <Select
+          value={status}
+          onChange={(v) => (status = v as TaskStatus)}
+          ariaLabel={t("Статус")}
+          options={statusStore.statuses.map(s => ({ value: s.id, label: statusStore.name(s.id) }))}
+        />
+      </div>
     {/if}
 
     <div class="field recurrence-block">
@@ -406,29 +421,41 @@
           <span class="sublabel">{recurrenceKey === "None" ? t("Дедлайн") : t("Первое срабатывание")}</span>
           <input type="datetime-local" bind:value={deadline} />
         </label>
-        <label class="field">
+        <div class="field">
           <span class="sublabel">{t("Повтор")}</span>
-          <select bind:value={recurrenceKey}>
-            <option value="None">{t("Без повтора")}</option>
-            <option value="Hourly">{t("Каждый час")}</option>
-            <option value="Daily">{t("Каждый день")}</option>
-            <option value="Weekly">{t("Каждую неделю")}</option>
-            <option value="Custom">{t("Свой интервал")}</option>
-            <option value="Weekdays">{t("По дням недели")}</option>
-          </select>
-        </label>
+          <Select
+            value={recurrenceKey}
+            onChange={(v) => (recurrenceKey = v as typeof recurrenceKey)}
+            ariaLabel={t("Повтор")}
+            options={[
+              { value: "None", label: t("Без повтора") },
+              { value: "Hourly", label: t("Каждый час") },
+              { value: "Daily", label: t("Каждый день") },
+              { value: "Weekly", label: t("Каждую неделю") },
+              { value: "Custom", label: t("Свой интервал") },
+              { value: "Weekdays", label: t("По дням недели") },
+            ]}
+          />
+        </div>
       </div>
 
       {#if recurrenceKey === "Custom"}
         <div class="custom-row">
           <span>{t("Каждые")}</span>
           <input type="number" bind:value={customN} min="1" style="width:64px;" />
-          <select bind:value={customUnit}>
-            <option value="Minutes">{t("минут")}</option>
-            <option value="Hours">{t("часов")}</option>
-            <option value="Days">{t("дней")}</option>
-            <option value="Weeks">{t("недель")}</option>
-          </select>
+          <div class="custom-unit">
+            <Select
+              value={customUnit}
+              onChange={(v) => (customUnit = v as RecurrenceUnit)}
+              ariaLabel={t("Единица интервала")}
+              options={[
+                { value: "Minutes", label: t("минут") },
+                { value: "Hours", label: t("часов") },
+                { value: "Days", label: t("дней") },
+                { value: "Weeks", label: t("недель") },
+              ]}
+            />
+          </div>
         </div>
       {/if}
 
@@ -454,19 +481,22 @@
     </label>
 
     {#if projectStore.active.length > 0 || projectId}
-      <label class="field">
+      <div class="field">
         <span class="label">{t("Проект")}</span>
-        <select bind:value={projectId}>
-          <option value="">{t("Без проекта")}</option>
-          {#each projectStore.active as p (p.id)}
-            <option value={p.id}>{p.name}</option>
-          {/each}
-          <!-- a task may hang on an archived project — we do not lose the link -->
-          {#each projectStore.projects.filter(p => p.archived && p.id === projectId) as p (p.id)}
-            <option value={p.id}>{p.name} ({t("архив")})</option>
-          {/each}
-        </select>
-      </label>
+        <Select
+          value={projectId}
+          onChange={(v) => (projectId = v)}
+          ariaLabel={t("Проект")}
+          options={[
+            { value: "", label: t("Без проекта") },
+            ...projectStore.active.map(p => ({ value: p.id, label: p.name })),
+            // a task may hang on an archived project — we do not lose the link
+            ...projectStore.projects
+              .filter(p => p.archived && p.id === projectId)
+              .map(p => ({ value: p.id, label: `${p.name} (${t("архив")})` })),
+          ]}
+        />
+      </div>
     {/if}
 
     <!-- Dependencies exist only for a saved task: the link is written into a
@@ -490,12 +520,15 @@
             {/each}
           </ul>
         {/if}
-        <select value="" onchange={(e) => addBlocker(e.currentTarget)}>
-          <option value="">{t("Добавить блокер...")}</option>
-          {#each candidateBlockers as c (c.id)}
-            <option value={c.id}>{c.title}</option>
-          {/each}
-        </select>
+        <!-- An action rather than a stored value: it always shows the placeholder
+             and adds whatever is picked, so there is nothing to bind to. -->
+        <Select
+          value=""
+          placeholder={t("Добавить блокер...")}
+          ariaLabel={t("Добавить блокер...")}
+          onChange={addBlocker}
+          options={candidateBlockers.map(c => ({ value: c.id, label: c.title }))}
+        />
       </div>
     {/if}
 
@@ -596,6 +629,12 @@
     align-items: center;
     font-size: 13px;
   }
+
+  /* The unit sits in a flex row next to "Каждые" and a number field. The native
+     select it replaced was sized by its widest option; the Select button fills its
+     container instead, so the width is set here rather than letting it stretch
+     across the rest of the row. */
+  .custom-unit { width: 120px; }
 
   .day-picker {
     display: flex;

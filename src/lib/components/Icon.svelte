@@ -45,6 +45,10 @@
     // heavy glyphs.
     winmin:   "M5 12h14",
     winmax:   "M5 5h14v14H5Z",
+    // "Restore down": the standard two offset rectangles. The maximise button used
+    // to borrow `collapse` (four inward corner brackets) for this state — that icon
+    // belongs to zen mode and read as four detached corners rather than a window.
+    winrestore: "M8 8h11v11H8Z M5 16V5h11",
     winclose: "M6 6l12 12 M18 6 6 18",
   };
 

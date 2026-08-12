@@ -84,7 +84,7 @@
       title={maximized ? t("Восстановить") : t("Развернуть")}
       aria-label={maximized ? t("Восстановить") : t("Развернуть")}
     >
-      <Icon name={maximized ? "collapse" : "winmax"} size={14} />
+      <Icon name={maximized ? "winrestore" : "winmax"} size={14} />
     </button>
     <button class="win-btn close" onclick={close} title={t("Закрыть")} aria-label={t("Закрыть")}>
       <Icon name="winclose" size={14} />

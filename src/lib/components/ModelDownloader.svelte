@@ -153,7 +153,7 @@
     color: var(--text-secondary);
   }
   .status.ok {
-    color: #16a34a;
+    color: var(--success);
   }
   .option-list {
     display: flex;
@@ -235,6 +235,6 @@
   }
   .error {
     font-size: 12px;
-    color: #dc2626;
+    color: var(--danger);
   }
 </style>

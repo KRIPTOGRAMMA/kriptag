@@ -1095,6 +1095,15 @@
     flex: 1;
     display: flex;
     overflow: hidden;
+    /* A flex item defaults to min-height: auto and refuses to shrink below its
+       content, so this box wants to grow to the full height of the note. Chromium
+       bounds it anyway because of the overflow: hidden above, which is why the
+       e2e suite never saw a problem — but that is engine behaviour, not a rule to
+       rely on, and the app runs in WebKitGTK where a long note could not be
+       scrolled: the host grew to the document's height, CodeMirror sized
+       .cm-scroller to the host, and there was nothing left to scroll while
+       .editor-body clipped the rest away. */
+    min-height: 0;
   }
   .cm-host :global(.cm-editor) {
     width: 100%;

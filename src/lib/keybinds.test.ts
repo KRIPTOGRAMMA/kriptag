@@ -73,6 +73,9 @@ describe("formatCombo", () => {
   it("KeyN -> N, Digit1 -> 1, модификаторы без изменений", () => {
     expect(formatCombo("Ctrl+Shift+KeyN")).toBe("Ctrl+Shift+N");
     expect(formatCombo("Ctrl+Digit1")).toBe("Ctrl+1");
+    // Backquote is not the character it types, so the hint would otherwise read
+    // "Ctrl+Backquote" — the code's name rather than the key on the keyboard.
+    expect(formatCombo("Ctrl+Backquote")).toBe("Ctrl+`");
   });
 });
 

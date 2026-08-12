@@ -21,8 +21,10 @@ export interface UiState {
   taskViewMode: string;
   smartListId: string | null;
   projectFilter: string;
+  categoryFilter: string;
   settingsTab: string;
   dashboardAppPeriod: number;
+  boardColWidths: Record<string, number>;
   noteId: string | null;
 }
 
@@ -80,4 +82,37 @@ export function restoreValid<T, F = T>(
 /** Restores a value from a fixed set of allowed ones (List/Board, a Settings tab). */
 export function restoreOneOf<T extends string>(saved: string | undefined, allowed: readonly T[], fallback: T): T {
   return allowed.includes(saved as T) ? (saved as T) : fallback;
+}
+
+/**
+ * Restores a number, clamped into a range (the board column width).
+ *
+ * Clamping rather than validating-then-falling-back: a width that drifted out of
+ * range is still a usable intent — the nearest allowed width is closer to what
+ * was asked for than the default is. Only a value that is not a finite number at
+ * all falls back, which covers a hand-edited store as well as the NaN that
+ * JSON.parse yields for `null`.
+ */
+export function restoreNumber(saved: unknown, min: number, max: number, fallback: number): number {
+  if (typeof saved !== "number" || !Number.isFinite(saved)) return fallback;
+  return Math.min(max, Math.max(min, saved));
+}
+
+/**
+ * Restores a map of numbers, clamping each and dropping anything unusable.
+ *
+ * Board column widths live per status id, and the set of statuses is editable:
+ * a column can be deleted or added between two launches. Entries are therefore
+ * filtered rather than trusted wholesale — a stale id simply goes unused, and a
+ * column with no entry falls back to the default width instead of collapsing.
+ * The whole map is dropped only if it is not an object at all.
+ */
+export function restoreNumberMap(saved: unknown, min: number, max: number): Record<string, number> {
+  if (typeof saved !== "object" || saved === null || Array.isArray(saved)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    out[key] = Math.min(max, Math.max(min, value));
+  }
+  return out;
 }

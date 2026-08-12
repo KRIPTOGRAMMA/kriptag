@@ -9,7 +9,7 @@
   import ChecklistEditor from "./ChecklistEditor.svelte";
   import VoiceButton from "./VoiceButton.svelte";
   import { voice } from "../voice.svelte";
-  import { applyCachedTheme } from "../theme";
+  import { applyCachedTheme, applyTheme } from "../theme";
   import type { PinnedItem, Subtask } from "../types";
   import { t } from "../i18n.svelte";
   import "../../app.css";
@@ -65,6 +65,13 @@
   let errorMsg: string | null = $state(null);
   let busy = $state(false);
 
+  // Paint from the localStorage cache first so the window does not flash, then
+  // reconcile against the DB in onMount. The cache alone is not enough here, and
+  // this window is where that shows: it is written as a side effect of the main
+  // window applying a theme, so a quick window opened by a hotkey without the
+  // main window ever having run in this webview finds nothing and falls back to
+  // applyTheme("system", {}) — which, with no prefers-color-scheme: dark coming
+  // from the compositor, renders light while the user has dark set.
   applyCachedTheme();
 
   // Clipboard mode expands into a note pre-filled from the clipboard. An empty
@@ -105,6 +112,9 @@
     // The initial mode comes from managed state (covering the case where the window
     // was already mounted before the event was emitted).
     api.getQuickMode().then(applyMode).catch(() => {});
+    // The authoritative theme. On failure the cached paint above stands rather
+    // than being reset to a default — a stale theme beats a wrong one.
+    api.getSettings().then((s) => applyTheme(s.theme_mode, s)).catch(() => {});
     categoryStore.load();
     // A live mode change while the window is open.
     const un = listen<string>("quick-mode", (e) => { applyMode(e.payload); });
@@ -495,7 +505,7 @@
   }
   .clip-hint {
     font-size: 11px;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
     margin: 0;
   }
   .row {
@@ -556,7 +566,7 @@
   }
   .pin-saved {
     font-size: 11px;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
     margin-left: auto;
   }
   .pin-title {
@@ -586,7 +596,7 @@
   .subs-label {
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
   }
   /* The checklist rows and the counter moved into ChecklistEditor: deleting a
      row means deleting text, so a separate cross is unnecessary. */
@@ -606,7 +616,7 @@
   .pin-empty-hint {
     margin: 0;
     font-size: 12px;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 </style>

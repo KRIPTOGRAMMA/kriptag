@@ -3,6 +3,7 @@ import {
   parseChecklist,
   formatChecklist,
   toggleLine,
+  moveLineToEnd,
   lineIndexAt,
   removeLineAt,
   emptyAfterBackspace,
@@ -326,5 +327,53 @@ describe("repairChecklistMarkup", () => {
   it("результат починки читается разбором как подзадача", () => {
     const fixed = repairChecklistMarkup("[ купить хлеб");
     expect(parseChecklist(fixed)).toEqual([{ title: "купить хлеб", done: false }]);
+  });
+});
+
+// A ticked subtask sinks to the bottom, as in Xiaomi Notes. Called only from the
+// checkbox click: doing it while typing would slide a line out from under the caret.
+describe("moveLineToEnd", () => {
+  it("отмеченная строка уходит в конец, остальные сохраняют порядок", () => {
+    expect(moveLineToEnd("[x] раз\n[ ] два\n[ ] три", 0))
+      .toBe("[ ] два\n[ ] три\n[x] раз");
+  });
+
+  it("из середины — тоже в конец", () => {
+    expect(moveLineToEnd("[ ] раз\n[x] два\n[ ] три", 1))
+      .toBe("[ ] раз\n[ ] три\n[x] два");
+  });
+
+  // Otherwise clicking the last checkbox would rewrite the text to no effect.
+  it("последняя строка остаётся на месте", () => {
+    const raw = "[ ] раз\n[x] два";
+    expect(moveLineToEnd(raw, 1)).toBe(raw);
+  });
+
+  it("несуществующий индекс ничего не меняет", () => {
+    const raw = "[ ] раз\n[ ] два";
+    expect(moveLineToEnd(raw, 5)).toBe(raw);
+    expect(moveLineToEnd(raw, -1)).toBe(raw);
+  });
+
+  // A trailing empty line is what the user is about to type into (Enter is already
+  // pressed). The ticked line goes BEFORE it, or the caret would end up below a
+  // completed subtask.
+  it("пустой хвост остаётся последним", () => {
+    expect(moveLineToEnd("[x] раз\n[ ] два\n", 0))
+      .toBe("[ ] два\n[x] раз\n");
+  });
+
+  it("строки без разметки считаются наравне с размеченными", () => {
+    expect(moveLineToEnd("раз\nдва\nтри", 0)).toBe("два\nтри\nраз");
+  });
+
+  // The move must not lose anything: parsing before and after yields the same set.
+  it("состав подзадач сохраняется, меняется только порядок", () => {
+    const raw = "[x] раз\n[ ] два\n[ ] три";
+    const before = parseChecklist(raw);
+    const after = parseChecklist(moveLineToEnd(raw, 0));
+    expect(after).toHaveLength(before.length);
+    expect([...after].sort((a, b) => a.title.localeCompare(b.title)))
+      .toEqual([...before].sort((a, b) => a.title.localeCompare(b.title)));
   });
 });

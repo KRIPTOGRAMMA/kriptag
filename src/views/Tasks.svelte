@@ -15,11 +15,13 @@
   import { parseChecklist, formatChecklist } from "../lib/checklistText";
   import TaskHistoryDetail from "../lib/components/TaskHistoryDetail.svelte";
   import Icon from "../lib/components/Icon.svelte";
+  import ContextMenu from "../lib/components/ContextMenu.svelte";
   import type { Task, Subtask, Category, CreateTaskPayload, UpdateTaskPayload, Project, GoalSnapshot, ActiveSession, SmartListFilter } from "../lib/types";
   import { hhmm } from "../lib/datetime";
   import { isTypingTarget, actionForKey, nextIndex, reconcileIndex } from "../lib/listnav";
   import { unblockCounts } from "../lib/blockers";
-  import { loadUiState, saveUiState, restoreOneOf, restoreValid } from "../lib/uistate";
+  import { onAccentText } from "../lib/surfaces";
+  import { loadUiState, saveUiState, restoreOneOf, restoreValid, restoreNumber, restoreNumberMap } from "../lib/uistate";
 
   type AiResult = { task_id: string; type: string; result?: string; error?: string };
 
@@ -32,6 +34,12 @@
   let listSubView = $state<"active" | "history" | "trash">("active");
   let showCreateModal = $state(false);
   let editingTask: Task | null = $state(null);
+
+  /* How long a single click waits to see whether it is really the first half of a
+     double click. The platform's own threshold is not exposed to the web, and this
+     matches what other toolkits use; shorter and a slow double click opens the
+     editor first, longer and renaming feels laggy. */
+  const DBLCLICK_MS = 250;
   let historyDetailTask: Task | null = $state(null);
 
   // List/Board is a switch in the page head. This used to be a separate
@@ -40,10 +48,62 @@
   // List/Board survives a restart (v0.9.79); the History/Trash sub-view above does
   // not, on purpose — opening straight into the Trash is disorienting.
   let viewMode = $state<"list" | "board">(restoreOneOf(loadUiState().taskViewMode, ["list", "board"] as const, "list"));
+
+  // Board column widths, dragged by the divider to the column's right (v0.10.06).
+  // The bounds are the column's own limits, not taste: below MIN a card's chips
+  // wrap onto their own lines and the card stops being scannable, and past MAX a
+  // single column crowds the others off a 1600px board.
+  //
+  // Stored per status id, not as one shared number: the columns are independent,
+  // and a status can be added or deleted between launches. A column with no entry
+  // simply gets COL_DEFAULT, so a new status needs no migration.
+  const COL_MIN = 180, COL_MAX = 520, COL_DEFAULT = 260;
+  let colWidths = $state<Record<string, number>>(
+    restoreNumberMap(loadUiState().boardColWidths, COL_MIN, COL_MAX),
+  );
+  let resizing = $state(false);
+
+  // The columns on screen, in order. Derived once rather than filtered at each
+  // use: the handles index into this list to find the column they resize, so a
+  // second copy filtered differently would move the wrong column.
+  const boardColumns = $derived(statusStore.statuses.filter(st => st.id !== "Archived"));
+
+  const widthOf = (statusId: string) => colWidths[statusId] ?? COL_DEFAULT;
+
+  function setColWidth(statusId: string, px: number) {
+    colWidths = { ...colWidths, [statusId]: Math.min(COL_MAX, Math.max(COL_MIN, px)) };
+  }
+
+  function startColResize(e: PointerEvent, statusId: string) {
+    e.preventDefault();
+    resizing = true;
+    const startX = e.clientX;
+    const startW = widthOf(statusId);
+    const el = e.currentTarget as HTMLElement;
+    // Pointer capture, so the drag survives the cursor leaving the handle —
+    // without it a quick pull drops the grab as soon as it outruns the divider.
+    el.setPointerCapture(e.pointerId);
+
+    const move = (ev: PointerEvent) => setColWidth(statusId, startW + (ev.clientX - startX));
+    const up = () => {
+      resizing = false;
+      el.releasePointerCapture(e.pointerId);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      saveUiState({ boardColWidths: colWidths });
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  }
   $effect(() => { saveUiState({ taskViewMode: viewMode }); });
 
   // Projects: the list filter ("all" | "none" | id) and the management modal
   let projectFilter = $state<string>("all");
+
+  // Categories: "all" or a category id (v0.9.99). A row of coloured chips rather
+  // than a <select> like the project filter — the category's own colour is the
+  // thing being picked, and a native option cannot carry it.
+  let categoryFilter = $state<string>("all");
   let showProjects = $state(false);
   let newProjectName = $state("");
 
@@ -151,6 +211,15 @@
       (id) => id === "all" || id === "none" || projectStore.projects.some(p => p.id === id),
       "all",
     );
+    // A category can be deleted between two launches. restoreValid drops the
+    // saved id silently in that case — restoring it blindly would open a list
+    // filtered by something that no longer exists, which reads as "I have no
+    // tasks" with no way to tell the difference.
+    categoryFilter = restoreValid(
+      saved.categoryFilter,
+      (id) => id === "all" || categoryStore.categories.some(c => c.id === id),
+      "all",
+    );
     restoredFilters = true;
   }
 
@@ -158,7 +227,7 @@
   // overwrite the very values still waiting to be read back.
   $effect(() => {
     if (!restoredFilters) return;
-    saveUiState({ smartListId: activeSmartListId, projectFilter });
+    saveUiState({ smartListId: activeSmartListId, projectFilter, categoryFilter });
   });
 
   // "Unblocks N" — the reverse of blocked_by (v0.9.78). Counted over activeTasks
@@ -193,10 +262,11 @@
         projectFilter === "none" ? !t.project_id :
         t.project_id === projectFilter
       )
+      .filter(t => categoryFilter === "all" ? true : t.category === categoryFilter)
       .filter(t => activeSmartListTest ? activeSmartListTest(t) : true)
   );
 
-  // The board uses the same project and smart-list filters as the list, but over
+  // The board uses the same project, category and smart-list filters as the list, but over
   // taskStore.tasks rather than activeTasks: completed tasks (hidden=true, the same
   // flag that moves them into History in list mode) must stay visible in their own
   // column rather than vanishing from the whole board.
@@ -208,6 +278,7 @@
         projectFilter === "none" ? !t.project_id :
         t.project_id === projectFilter
       )
+      .filter(t => categoryFilter === "all" ? true : t.category === categoryFilter)
       .filter(t => activeSmartListTest ? activeSmartListTest(t) : true)
   );
 
@@ -584,11 +655,47 @@
     subsTimers[task.id] = setTimeout(() => flushSubs(task), SUBS_DEBOUNCE_MS);
   }
 
+  // A pending deferred write, i.e. the user has typed something not yet saved.
+  // The entry is DELETED rather than only cleared: clearTimeout leaves the id in
+  // place, so a plain truthiness check would report "pending" forever after the
+  // first edit and freeze the cache permanently.
+  function subsPending(id: string): boolean {
+    return subsBusy[id] === true || subsTimers[id] !== undefined;
+  }
+
   // The same positional diff as in the modal and the slot: line i edits subtask i.
   // An error is shown as a banner and the text is left as is, so the edit does not
   // disappear silently.
+  // Drops the panel's cached text for a task whose checklist the BACKEND changed
+  // underneath it.
+  //
+  // Ticking the last subtask now completes the task on its own
+  // (subtasks.rs::complete_if_all_subtasks_done), and for a recurring task that
+  // clears every tick as the plan for the next run. The cache knew nothing about
+  // it: the screen kept showing ticked boxes over an untitled DB, and the next
+  // edit would have flushed those ticks straight back, undoing the reset.
+  //
+  // Compared against the store rather than cleared on completion, because the
+  // reset happens inside the backend and the frontend never sees the moment.
+  function dropStaleSubsCache() {
+    for (const id of Object.keys(subsText)) {
+      const task = taskStore.tasks.find(t => t.id === id);
+      // The task is gone from the list (completed, deleted) — nothing to edit.
+      if (!task) { delete subsText[id]; continue; }
+      // A pending write is the user's own text; it must win until it lands.
+      if (subsPending(id)) continue;
+      const cached = parseChecklist(subsText[id]);
+      const real = task.subtasks;
+      const same =
+        cached.length === real.length &&
+        cached.every((c, i) => c.title === real[i].title && c.done === real[i].done);
+      if (!same) delete subsText[id];
+    }
+  }
+
   async function flushSubs(task: Task) {
     clearTimeout(subsTimers[task.id]);
+    delete subsTimers[task.id];
     if (subsBusy[task.id]) return;
     const current = parseChecklist(subsText[task.id] ?? "");
     const orig = task.subtasks;
@@ -618,6 +725,10 @@
     } finally {
       subsBusy[task.id] = false;
     }
+    // After the write lands: the backend may have completed the task on its own
+    // (the last subtask was ticked), and for a recurring one that clears the
+    // checklist. Runs outside the finally so the flag is already down.
+    dropStaleSubsCache();
   }
 
   let expanded = $state<Record<string, boolean>>({});
@@ -674,12 +785,70 @@
     lastSelectedId = task.id;
   }
 
+  // --- Renaming a task in place ---
+  //
+  // A single click edits the title, a double click opens the modal. The title is
+  // the field that gets corrected most often, and going through a modal for a
+  // typo was the slow path.
+  //
+  // The two gestures share the first click, so opening the editor has to wait long
+  // enough to find out whether a second one is coming — otherwise every double
+  // click would flash an input on its way to the modal.
+  let renamingId: string | null = $state(null);
+  let renameText = $state("");
+  let renameTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelPendingRename() {
+    if (renameTimer !== null) {
+      clearTimeout(renameTimer);
+      renameTimer = null;
+    }
+  }
+
+  function startRename(task: Task) {
+    cancelPendingRename();
+    renamingId = task.id;
+    renameText = task.title;
+  }
+
+  // Saving is deliberately forgiving: Enter and losing focus both commit, the way
+  // the quick slot already behaves. An empty title is not a way to delete a task,
+  // so it reverts instead of saving.
+  async function commitRename() {
+    const id = renamingId;
+    if (!id) return;
+    const task = taskStore.tasks.find(t => t.id === id);
+    const next = renameText.trim();
+    renamingId = null;
+    if (!task || !next || next === task.title) return;
+    await taskStore.update(id, { title: next });
+  }
+
+  function cancelRename() {
+    renamingId = null;
+  }
+
   function onRowClick(e: MouseEvent, task: Task) {
     if (e.ctrlKey || e.metaKey || e.shiftKey) {
       e.preventDefault();
       toggleSelect(task, e);
       return;
     }
+    // Already editing this row: a click inside the input must not restart it.
+    if (renamingId === task.id) return;
+    // Held back until the double-click window passes; ondblclick clears it.
+    cancelPendingRename();
+    renameTimer = setTimeout(() => {
+      renameTimer = null;
+      startRename(task);
+    }, DBLCLICK_MS);
+  }
+
+  function onRowDblClick(e: MouseEvent, task: Task) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+    // Beats the pending single-click editor to it.
+    cancelPendingRename();
+    renamingId = null;
     editingTask = task;
   }
 
@@ -687,6 +856,44 @@
     selectedIds = new Set();
     lastSelectedId = null;
   }
+
+  // --- The row's context menu (v0.9.98) ---
+  //
+  // These six actions used to be .task-actions, revealed on hover. Hover-only made
+  // them undiscoverable and unreachable from the keyboard, and on a long list the
+  // icons flickered in and out under the moving pointer. A left click still opens
+  // the modal — that gesture is older than this menu and stays where it was.
+  let rowMenu = $state<{ x: number; y: number; task: Task } | null>(null);
+
+  function openRowMenu(e: MouseEvent, task: Task) {
+    e.preventDefault();
+    rowMenu = { x: e.clientX, y: e.clientY, task };
+  }
+
+  // Two entries carry state rather than just an action, so their label is the
+  // state: "Start tracking" against "Stop tracking". The wording is lifted from
+  // the titles the icon buttons used, so nothing new needs translating.
+  const rowMenuItems = $derived.by(() => {
+    const task = rowMenu?.task;
+    if (!task) return [];
+    const tracking = trackingId === task.id;
+    const pinned = pinnedStore.is("task", task.id);
+    // The three AI entries share one in-flight flag, the same one the icon
+    // buttons used to read.
+    const busy = aiLoadingId === task.id;
+    return [
+      // The modal is a double click now that one click renames. A double click is
+      // not a discoverable gesture, so the menu carries the same thing in words.
+      { label: t("Открыть карточку"), onSelect: () => { editingTask = task; } },
+      { label: t("Переименовать"), separated: true, onSelect: () => startRename(task) },
+      { label: t("Переформулировать в SMART"), disabled: busy, onSelect: () => rewriteTask(task.id, task.title) },
+      { label: t("Разбить на подзадачи"), disabled: busy, onSelect: () => generateSubtasks(task.id, task.title) },
+      { label: t("Авто-категория"), disabled: busy, onSelect: () => classifyTask(task.id, task.title) },
+      { label: tracking ? t("Остановить трекинг") : t("Начать трекинг"), separated: true, onSelect: () => toggleTracking(task.id) },
+      { label: pinned ? t("Убрать из быстрого слота") : t("В быстрый слот (Ctrl+Shift+J)"), onSelect: () => pinnedStore.toggle("task", task.id) },
+      { label: t("Удалить"), danger: true, separated: true, onSelect: () => taskStore.remove(task.id) },
+    ];
+  });
 
   // --- Keyboard navigation over the list (v0.9.77) ---
   //
@@ -716,6 +923,16 @@
   }
 
   function onListKeydown(e: KeyboardEvent) {
+    // Ctrl+Tab toggles List/Board. Handled before every guard below: those exist to
+    // protect the list cursor, but this shortcut belongs to the screen and has to
+    // work from the board too — which the cursor guards would otherwise block.
+    // A modal still wins: Tab inside one is moving between its fields.
+    if (e.ctrlKey && !e.altKey && e.code === "Tab" && !editingTask && !historyDetailTask) {
+      e.preventDefault();
+      viewMode = viewMode === "list" ? "board" : "list";
+      return;
+    }
+
     // Only the active list has a cursor. In History and the Trash the actions would
     // mean something else (Delete there is "purge forever"), and the board is
     // two-dimensional — j/k cannot express a move across columns.
@@ -743,7 +960,9 @@
     if (!task) return;
     e.preventDefault();
     if (action === "open") {
-      editingTask = task;
+      // Enter renames, matching what one click now does with the mouse. The modal
+      // is the double click, or "Редактировать" in the row's context menu.
+      startRename(task);
     } else if (action === "complete") {
       // The blocked-task prohibition lives in the backend (v0.9.56) and the row's
       // checkmark is disabled — the keyboard must not become the one path that
@@ -947,6 +1166,35 @@
 
 <svelte:window onkeydown={onListKeydown} />
 
+<!-- One resize handle. Rendered between every pair of columns and once more
+     after the last one, always driving the column named here. Its own element
+     rather than a border on .column, because a 1px border is far too small a
+     target to grab. -->
+{#snippet colHandle(target: { id: string })}
+  <!-- role=slider, not separator: this one is focusable and driven by the arrow
+       keys, and a separator is non-interactive by definition — the a11y lint
+       flags a tabindex on it for exactly that reason. A slider is what a
+       draggable value with a min/max actually is. -->
+  <div
+    class="col-resize"
+    role="slider"
+    aria-label={t("Ширина колонки «{name}»", { name: statusStore.name(target.id) })}
+    aria-orientation="vertical"
+    aria-valuenow={widthOf(target.id)}
+    aria-valuemin={COL_MIN}
+    aria-valuemax={COL_MAX}
+    tabindex="0"
+    onpointerdown={(e) => startColResize(e, target.id)}
+    onkeydown={(e) => {
+      // Keyboard is not a nicety here: a pointer drag is the only other way to
+      // reach this, and it is unusable without a mouse.
+      const step = e.shiftKey ? 40 : 10;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setColWidth(target.id, widthOf(target.id) - step); saveUiState({ boardColWidths: colWidths }); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); setColWidth(target.id, widthOf(target.id) + step); saveUiState({ boardColWidths: colWidths }); }
+    }}
+  ></div>
+{/snippet}
+
 {#snippet taskRow(task: Task)}
   {@const busy = aiLoadingId === task.id}
   {@const blocked = task.blocked_by.length > 0}
@@ -970,6 +1218,7 @@
     ondragover={(e) => rowDragOver(e, task)}
     ondrop={(e) => rowDrop(e, task)}
     ondragend={() => { dragTaskId = null; dropTargetId = null; }}
+    oncontextmenu={(e) => openRowMenu(e, task)}
   >
     <!-- A blocked task cannot be completed. The backend forbids it too, but
          disabled here keeps a click from producing an error. -->
@@ -984,17 +1233,42 @@
     <div
       class="task-main"
       onclick={(e) => onRowClick(e, task)}
-      onkeydown={(e) => { if (e.key === "Enter") editingTask = task; }}
+      ondblclick={(e) => onRowDblClick(e, task)}
+      onkeydown={(e) => { if (e.key === "Enter") startRename(task); }}
       role="button"
       tabindex="0"
     >
-      <div class="task-title">
-        <span class="prio-dot" title="{t('Приоритет')}: {PRIORITY_LABELS[task.priority]}"></span>
-        {task.title}
-        {#if recurrenceLabel(task.recurrence)}
-          <span class="muted" title={recurrenceLabel(task.recurrence)}>↻</span>
-        {/if}
-      </div>
+      {#if renamingId === task.id}
+        <input
+          class="task-title-edit"
+          bind:value={renameText}
+          {@attach (el) => {
+            // Focus from an attachment rather than the autofocus attribute: the
+            // browser only honours autofocus for the first such element after a
+            // page load, so it worked when the editor was opened from the keyboard
+            // and silently did nothing when opened by a click.
+            el.focus();
+            el.select();
+          }}
+          onblur={commitRename}
+          onkeydown={(e) => {
+            // stopPropagation, not just preventDefault: the row's own onkeydown
+            // sits on the ancestor .task-main and would catch this same Enter and
+            // start the rename over, throwing away what was just typed.
+            if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commitRename(); }
+            // Stops the list's own Escape handler from also clearing the selection.
+            else if (e.key === "Escape") { e.stopPropagation(); cancelRename(); }
+          }}
+          aria-label={t("Название задачи")}
+        />
+      {:else}
+        <div class="task-title" title="{t('Приоритет')}: {PRIORITY_LABELS[task.priority]}">
+          {task.title}
+          {#if recurrenceLabel(task.recurrence)}
+            <span class="muted" title={recurrenceLabel(task.recurrence)}>↻</span>
+          {/if}
+        </div>
+      {/if}
       {#if task.description}
         <div class="task-desc">{task.description}</div>
       {/if}
@@ -1027,29 +1301,15 @@
       {#each task.tags as tag}
         <span class="chip chip-tag">#{tag}</span>
       {/each}
-      <span class="chip chip-cat" style="--cat: {categoryStore.color(task.category)}">{categoryStore.name(task.category)}</span>
+      <!-- Outlined rather than filled: up to four chips sit side by side on a row,
+           and the solid weight is reserved for the active category filter. -->
+      <span class="chip chip-cat chip-cat--edge" style="--cat: {categoryStore.color(task.category)}">{categoryStore.name(task.category)}</span>
       {#if task.deadline}
         {@const dl = deadlineInfo(task.deadline)}
         <span class="chip" class:chip-danger={dl.overdue}><Icon name="flag" size={11} /> {dl.label}</span>
       {/if}
     </div>
 
-    <div class="task-actions">
-      <button class="btn-icon" disabled={busy} title={t("Переформулировать в SMART")}
-        onclick={() => rewriteTask(task.id, task.title)}>{#if busy}…{:else}<Icon name="sparkles" />{/if}</button>
-      <button class="btn-icon" disabled={busy} title={t("Разбить на подзадачи")}
-        onclick={() => generateSubtasks(task.id, task.title)}>{#if busy}…{:else}<Icon name="shuffle" />{/if}</button>
-      <button class="btn-icon" disabled={busy} title={t("Авто-категория")}
-        onclick={() => classifyTask(task.id, task.title)}>{#if busy}…{:else}<Icon name="tag" />{/if}</button>
-      <button class="btn-icon" title={trackingId === task.id ? t("Остановить трекинг") : t("Начать трекинг")}
-        onclick={() => toggleTracking(task.id)} class:active={trackingId === task.id}>
-        {#if trackingId === task.id}<Icon name="stop" />{:else}<Icon name="play" />{/if}</button>
-      <button class="btn-icon" class:active={pinnedStore.is("task", task.id)}
-        title={pinnedStore.is("task", task.id) ? t("Убрать из быстрого слота") : t("В быстрый слот (Ctrl+Shift+J)")}
-        onclick={() => pinnedStore.toggle("task", task.id)}><Icon name="zap" /></button>
-      <button class="btn-icon btn-danger" title={t("Удалить")}
-        onclick={() => taskStore.remove(task.id)}>✕</button>
-    </div>
   </li>
 
   {#if subtasksPreview && subtasksPreview.taskId === task.id}
@@ -1095,6 +1355,15 @@
     task={editingTask}
     onSave={handleEdit}
     onClose={() => editingTask = null}
+  />
+{/if}
+
+{#if rowMenu}
+  <ContextMenu
+    x={rowMenu.x}
+    y={rowMenu.y}
+    items={rowMenuItems}
+    onClose={() => rowMenu = null}
   />
 {/if}
 
@@ -1357,10 +1626,32 @@
   {/if}
 
   {#if viewMode === "board"}
-    <div class="board">
-      {#each statusStore.statuses.filter(s => s.id !== "Archived") as col (col.id)}
+    <!-- The board reports its own distance from the top of the window, so the
+         columns can reach the bottom edge exactly. It cannot be a constant: the
+         header wraps at narrow widths, and the filter chips, the error bar and
+         the bulk-selection bar all appear and disappear above the board. -->
+    <div
+      class="board"
+      class:resizing
+      {@attach (el) => {
+        const sync = () => el.style.setProperty("--board-top", `${Math.round(el.getBoundingClientRect().top)}px`);
+        sync();
+        // Observed rather than measured once: everything above the board can change
+        // height without the board itself re-rendering.
+        const ro = new ResizeObserver(sync);
+        ro.observe(el);
+        ro.observe(document.documentElement);
+        window.addEventListener("resize", sync);
+        return () => { ro.disconnect(); window.removeEventListener("resize", sync); };
+      }}
+    >
+      {#each boardColumns as col, i (col.id)}
+        {#if i > 0}
+          {@render colHandle(boardColumns[i - 1])}
+        {/if}
         <div
           class="column"
+          style="--col-w: {widthOf(col.id)}px"
           role="list"
           class:drop-target={boardDropTargetStatus === col.id}
           ondragover={(e) => columnDragOver(e, col.id)}
@@ -1375,23 +1666,41 @@
 
           <div class="column-body">
             {#each boardTasksFor(col.id) as task (task.id)}
+              {@const cardBlocked = task.blocked_by.length > 0}
               <button
                 class="board-card"
+                style="--prio: var(--prio-{task.priority.toLowerCase()});"
+                title={cardBlocked
+                  ? t("Заблокирована: {tasks}", { tasks: task.blocked_by.map(b => b.title).join(", ") })
+                  : `${t('Приоритет')}: ${PRIORITY_LABELS[task.priority]}`}
+                class:blocked={cardBlocked}
                 class:dragging={boardDragTaskId === task.id}
                 draggable="true"
                 ondragstart={(e) => cardDragStart(e, task)}
                 ondragend={() => { boardDragTaskId = null; boardDropTargetStatus = null; }}
                 onclick={() => editingTask = task}
+                oncontextmenu={(e) => openRowMenu(e, task)}
               >
                 <div class="board-card-title">
-                  <span class="prio-dot" style="--prio: var(--prio-{task.priority.toLowerCase()});" title="{t('Приоритет')}: {PRIORITY_LABELS[task.priority]}"></span>
                   {task.title}
                   {#if trackingId === task.id}
                     <span class="tracking-dot" title={t("Идёт трекинг")}><Icon name="play" size={10} /></span>
                   {/if}
                 </div>
                 <div class="board-card-meta">
-                  <span class="chip chip-cat" style="--cat: {categoryStore.color(task.category)}">{categoryStore.name(task.category)}</span>
+                  <span class="chip chip-cat chip-cat--edge" style="--cat: {categoryStore.color(task.category)}">{categoryStore.name(task.category)}</span>
+                  <!-- Only the count, without the list's progress bar and without
+                       the "+" for an empty task: in the list that chip is a button
+                       that unfolds the subtask editor below the row, and a card has
+                       nowhere to unfold into. So it stays a plain chip — a card that
+                       has no subtasks simply says nothing. -->
+                  {#if task.subtasks.length > 0}
+                    <span
+                      class="chip chip-subs"
+                      class:subs-done={doneCount(task) === task.subtasks.length}
+                      title={t("Подзадачи")}
+                    >{doneCount(task)}/{task.subtasks.length}</span>
+                  {/if}
                   {#if task.deadline}
                     {@const dl = deadlineInfo(task.deadline)}
                     <span class="chip" class:chip-danger={dl.overdue}><Icon name="flag" size={10} /> {dl.label}</span>
@@ -1407,6 +1716,12 @@
           </div>
         </div>
       {/each}
+      {#if boardColumns.length > 0}
+        <!-- The last column's handle, on its right. Without it that column was the
+             one you could not resize: the handles sit between columns and each one
+             drives the column to its left, so the rightmost had nothing after it. -->
+        {@render colHandle(boardColumns[boardColumns.length - 1])}
+      {/if}
       <div class="add-column">
         <button class="btn-sm" onclick={() => showStatusQuickAdd = true}>{t("+ Колонка")}</button>
         {#if showStatusQuickAdd}
@@ -1456,6 +1771,30 @@
       {/each}
       <button class="chip smart-list-chip smart-list-add" title={t("Создать умный список")} onclick={() => showSmartListModal = true}>{t("+ Список")}</button>
     </div>
+
+    <!-- The category filter (v0.9.99). A separate row from the smart lists above:
+         those are saved queries, these are one attribute of a task, and merging
+         them would suggest picking one cancels the other. -->
+    {#if categoryStore.categories.length > 0}
+      <div class="cat-filter">
+        <button
+          class="chip"
+          class:chip-cat--solid={categoryFilter === "all"}
+          style={categoryFilter === "all" ? `--cat: var(--text-secondary); --on-cat: var(--bg-card)` : ""}
+          onclick={() => categoryFilter = "all"}
+        >{t("Все")}</button>
+        {#each categoryStore.categories as c (c.id)}
+          {@const on = categoryFilter === c.id}
+          <button
+            class="chip chip-cat"
+            class:chip-cat--solid={on}
+            class:chip-cat--edge={!on}
+            style="--cat: {c.color}; --on-cat: {onAccentText(c.color)}"
+            onclick={() => categoryFilter = on ? "all" : c.id}
+          >{categoryStore.name(c.id)}</button>
+        {/each}
+      </div>
+    {/if}
   {/if}
 
   {#if !searchQuery.trim()}
@@ -1623,15 +1962,83 @@
 </div>
 
 <style>
+  /* The shell for the two dialogs in this view — Projects and the new smart list.
+     Both carried class="modal dialog" while only .modal was ever defined (in
+     app.css), so they got a card with no padding: the title sat 1px from the
+     border and the buttons ran into the edges, which read as a window cut off
+     rather than a dialog.
+
+     The numbers match .dialog in TaskModal, which is what these two sit next to.
+     Deliberately duplicated rather than lifted into app.css: five components
+     declare their own .dialog and four differ only in max-width and gap, so
+     merging them is its own change, not a side effect of this fix. */
+  .dialog {
+    width: 100%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dialog-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  /* Buttons on the trailing edge, pushed down off the content above. */
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  /* The cap sits on the content below the header, not on .page itself. It used to
+     be on .page, which made the header inherit it: in List mode the whole bar —
+     search, "Projects", the Active/History/Trash switch, "+ New" — stopped 1200px
+     in and left an empty strip on both sides, while in Board mode (1600px) it ran
+     to the window edge. The same bar in the same place changed width when the view
+     below it changed, which is what showed up in the screenshots.
+
+     The reason for a cap at all is the task rows: a row stretched across a wide
+     monitor puts its title and its chips absurdly far apart. That argument is
+     about the rows, so the cap belongs to them. */
   .page {
-    max-width: 860px;
     margin: 0 auto;
+  }
+
+  /* Left-aligned inside .page, never `margin: 0 auto`. Centring each child made
+     them line up with nothing: .task-list is not a direct child, so it kept the
+     page's left edge at 196px while the chips and the composer — which are —
+     were centred to 288px. Three different left edges on one screen. Everything
+     under the header starts where the header starts; only the width is capped. */
+  .page > * {
+    max-width: 1200px;
+    margin-right: auto;
   }
 
   /* The board is wider than the list: several columns in a row do not fit into
      the narrow task-list container. */
-  .page.board-mode {
-    max-width: 1400px;
+  .page.board-mode > * {
+    max-width: 1600px;
+  }
+
+  /* The header is the one child that opts out, so it spans the window in both
+     modes. Written as an override rather than as `> :not(.page-head)` because
+     viewWidth.test.ts reads the ceiling out of the `.page > *` rule by name;
+     a :not() selector hid it and the guard reported Tasks as having no ceiling
+     at all.
+
+     It must stay below the .board-mode rule: that selector has the same
+     specificity, so whichever comes last wins. Placed above, the board re-capped
+     the header at 1600px and the widths diverged again past a 1600px window —
+     the same defect, just further out. */
+  .page > .page-head {
+    max-width: none;
   }
 
   .page-head {
@@ -1640,12 +2047,6 @@
     gap: 8px;
     margin-bottom: 14px;
     flex-wrap: wrap;
-    /* The window buttons float in the top right corner, so we reserve room for
-       them or the search and filters end up underneath. The padding lives here
-       rather than on .content: narrowing the whole column breaks views that
-       compute their width in pixels (the graph clamps nodes with
-       Math.min(width - 20)). */
-    padding-right: var(--wincontrols-w);
   }
 
   .count { font-size: 12px; }
@@ -1860,6 +2261,20 @@
     margin-bottom: 12px;
   }
 
+  /* The category filter row. Sits tighter under the smart lists than they sit
+     under each other, so the two read as related but distinct controls. */
+  .cat-filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: -4px 0 12px;
+  }
+
+  .cat-filter .chip {
+    cursor: pointer;
+  }
+
   .smart-list-chip {
     cursor: pointer;
     border: none;
@@ -1920,20 +2335,75 @@
   /* --- The board --- */
   .board {
     display: flex;
-    gap: 12px;
+    /* No gap: the resize handle sits in each gap and provides the spacing itself.
+       With both, the columns would drift 12px further apart per divider. */
+    gap: 0;
     align-items: flex-start;
     overflow-x: auto;
     padding-bottom: 8px;
   }
 
+  /* The grab area is 12px wide — the same space the gap used to be — while the
+     visible line inside it is 1px. A handle only as wide as its line would be a
+     1px target. */
+  .col-resize {
+    flex: 0 0 12px;
+    align-self: stretch;
+    cursor: col-resize;
+    position: relative;
+    background: none;
+    border: none;
+    padding: 0;
+  }
+
+  .col-resize::before {
+    content: "";
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 50%;
+    width: 1px;
+    background: var(--border);
+    transform: translateX(-50%);
+    transition: background 0.12s, width 0.12s;
+  }
+
+  .col-resize:hover::before,
+  .col-resize:focus-visible::before,
+  .board.resizing .col-resize::before {
+    background: var(--accent);
+    width: 3px;
+  }
+
+  .col-resize:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  /* While dragging, the cursor is the resize arrow everywhere and text stops
+     selecting — otherwise a pull across a column highlights every card title. */
+  .board.resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+
   .column {
-    flex: 0 0 260px;
+    flex: 0 0 var(--col-w, 260px);
     display: flex;
     flex-direction: column;
     background: var(--bg-secondary);
     border-radius: var(--radius);
     border: 1px solid var(--border);
-    max-height: calc(100vh - 220px);
+    /* Fill the window down to its bottom edge, rather than stopping at a guessed
+       height. This was `calc(100vh - 220px)`: 220 stood for everything above the
+       board, but the real offset depends on the header wrapping, the filter chips
+       and the error and bulk bars, which appear and disappear. Measured at a
+       940px window it left the column ending at 794 with 146px of empty page
+       below — and those 146px were unreachable, because the cards are scrolled by
+       .column-body inside the column, not by the page.
+
+       The 8px keeps .board's own padding-bottom off the window edge. */
+    max-height: calc(100vh - var(--board-top, 74px) - 8px);
   }
 
   .column.drop-target {
@@ -1984,10 +2454,28 @@
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 8px 10px;
+    /* 13 = the row's own 10 minus the 3 the edge occupies, so the text keeps the
+       same distance from the card's content edge as before. */
+    padding: 8px 10px 8px 13px;
     cursor: pointer;
     font: inherit;
     color: inherit;
+    position: relative;
+  }
+
+  /* The same priority edge as .task-row, for the same reason: as a dot it sat
+     inside .board-card-title and pushed every title right by its own width plus
+     the flex gap, so titles started at different offsets down a column. On the
+     edge they line up and the colour reads without looking at each card. */
+  .board-card::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 3px;
+    bottom: 3px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--prio, var(--prio-low));
   }
 
   .board-card:hover {
@@ -1997,6 +2485,26 @@
   .board-card.dragging {
     opacity: 0.5;
   }
+
+  /* Same colours as the list's .chip-sub, without its button behaviour: accent
+     while there is work left, green once everything is ticked. */
+  .chip-subs {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    font-weight: 600;
+  }
+  .chip-subs.subs-done {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+
+  /* Blocked, dimmed the same way as .task-row.blocked and for the same reason:
+     the contents fade, never the card itself, or the priority edge would fade
+     with them. The blocker's name is in the card's title attribute rather than
+     spelled out as a line — the list has the row's full width for that, while a
+     column is narrow enough that the extra line would make cards jump in height. */
+  .board-card.blocked .board-card-title,
+  .board-card.blocked .board-card-meta { opacity: .55; }
 
   .board-card-title {
     display: flex;
@@ -2050,8 +2558,28 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 12px;
+    padding: 7px 12px 7px 15px;
     border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+
+  /* Priority as the row's left edge rather than a dot before the title: the dot
+     sat inside .task-title, so titles started at different offsets and the
+     colour only read from close up. On the edge the titles line up and the
+     colour is scannable down the whole list.
+
+     The composer preview keeps .prio-dot: it names the priority in words next to
+     it, so the dot is a swatch for that label rather than a mark on a task. The
+     board card took the same edge (v0.10.03). */
+  .task-row::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 3px;
+    bottom: 3px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--prio, var(--prio-low));
   }
 
   .task-list > .task-row:last-child,
@@ -2109,6 +2637,20 @@
     text-overflow: ellipsis;
   }
 
+  /* The rename field stands where the title was and keeps its type, so the row
+     does not jump when the editor opens. Only the frame says it is editable:
+     matching the title's own size and weight is what makes this read as editing
+     the row rather than as a form appearing inside it. */
+  .task-title-edit {
+    width: 100%;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 1px 6px;
+    /* Cancels the 5px 10px from app.css, which would push the row taller than its
+       neighbours for as long as the editor is open. */
+    margin: -2px 0;
+  }
+
   .done-title {
     color: var(--text-secondary);
     text-decoration: line-through;
@@ -2125,7 +2667,7 @@
 
   /* A blocked task is dimmed but readable: it stays in the list so it is not
      forgotten. Only the row's contents are dimmed, not the row itself — an
-     opacity on .task-row would also mute the coloured priority bar on the
+     opacity on .task-row would also mute the coloured priority edge on the
      left, which is what makes the list scannable. */
   .task-row.blocked .task-main,
   .task-row.blocked .task-meta { opacity: .55; }
@@ -2198,7 +2740,10 @@
     background: currentColor;
   }
 
-  /* The actions are visible only on hovering the row */
+  /* Only History and the Trash still use .task-actions, and there it is a single
+     button per row. The active list moved its six actions into the row's context
+     menu (v0.9.98) — hover-only made them undiscoverable and unreachable from the
+     keyboard, which a one-button row does not suffer from nearly as much. */
   .task-actions {
     display: flex;
     gap: 1px;
@@ -2240,8 +2785,18 @@
      items and the field styling live there now. .sub-line remains — it is used
      by the AI suggestion rows above. */
 
+  /* No priority edge in History or the Trash. Those rows never set --prio, so
+     the edge would fall back to --prio-low and paint every finished or deleted
+     task a grey stripe that means "low priority" — a signal about a task no
+     longer being worked on. */
+  .history .task-row::before,
+  .trash .task-row::before {
+    display: none;
+  }
+
   .history .task-row {
     opacity: 0.75;
+    padding-left: 12px;
   }
 
   /* The Trash uses the same muted row as History but with an explicit red accent
@@ -2249,6 +2804,7 @@
      used to share the same green .task-check.done). */
   .trash .task-row {
     opacity: 0.75;
+    padding-left: 12px;
   }
 
   .trash-icon {

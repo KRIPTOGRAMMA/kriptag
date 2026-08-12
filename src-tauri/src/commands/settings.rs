@@ -60,6 +60,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub color_bg_hover: String,     // the hover fill of rows and ghost buttons (--bg-hover)
     #[serde(default)]
+    pub color_bg_card: String,      // cards, buttons, task rows (--bg-card)
+    #[serde(default)]
+    pub color_text_secondary: String, // captions, dates, counters (--text-secondary)
+    #[serde(default)]
     pub color_text: String,
     #[serde(default)]
     pub color_border: String,
@@ -73,6 +77,8 @@ pub struct AppSettings {
     pub openai_in_keyring: bool,     // runtime-only: the key lives in the keyring
     #[serde(default)]
     pub anthropic_in_keyring: bool,  // runtime-only: the key lives in the keyring
+    #[serde(default)]
+    pub custom_theme_presets: String, // JSON [{name, colors:{color_*}}] — user-saved colour sets
     #[serde(default)]
     pub app_category_rules: String,  // JSON [{pattern, category}] — window classes to categories
     #[serde(default)]
@@ -124,6 +130,15 @@ fn default_true() -> bool { true }
 // The sentinel for an indefinite notification pause.
 pub const QUIET_FOREVER: &str = "9999-12-31T00:00:00+00:00";
 
+// Shape-only check for settings values the frontend owns the schema of. The
+// backend deliberately does not model saved colour sets: it never reads their
+// contents, and duplicating the schema here would mean two places to update
+// whenever a colour key is added. Rejecting anything that is not a JSON array
+// is enough to keep a malformed value out of the DB.
+fn is_json_array(s: &str) -> bool {
+    matches!(serde_json::from_str::<serde_json::Value>(s), Ok(serde_json::Value::Array(_)))
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -148,6 +163,8 @@ impl Default for AppSettings {
             color_bg: String::new(),
             color_bg_secondary: String::new(),
             color_bg_hover: String::new(),
+            color_bg_card: String::new(),
+            color_text_secondary: String::new(),
             color_text: String::new(),
             color_border: String::new(),
             quiet_until: String::new(),
@@ -155,6 +172,7 @@ impl Default for AppSettings {
             ai_fallback: false,
             openai_in_keyring: false,
             anthropic_in_keyring: false,
+            custom_theme_presets: String::new(),
             app_category_rules: String::new(),
             app_limits: String::new(),
             auto_backup_dir: String::new(),
@@ -177,7 +195,7 @@ impl Default for AppSettings {
 // Manager) rather than in SQLite as plain text. If the keyring is unavailable
 // (no daemon), we fall back to the settings table.
 fn keyring_set(name: &str, value: &str) -> Result<(), keyring::Error> {
-    let entry = keyring::Entry::new("ai-notes", name)?;
+    let entry = keyring::Entry::new("kriptag", name)?;
     if value.is_empty() {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -189,7 +207,7 @@ fn keyring_set(name: &str, value: &str) -> Result<(), keyring::Error> {
 }
 
 fn keyring_get(name: &str) -> Option<String> {
-    keyring::Entry::new("ai-notes", name).ok()?.get_password().ok()
+    keyring::Entry::new("kriptag", name).ok()?.get_password().ok()
 }
 
 pub(crate) async fn get_setting(pool: &SqlitePool, key: &str) -> Option<String> {
@@ -268,11 +286,14 @@ pub async fn load_settings_raw(pool: &SqlitePool) -> AppResult<AppSettings> {
     if let Some(v) = get_setting(pool, "color_bg").await { s.color_bg = v; }
     if let Some(v) = get_setting(pool, "color_bg_secondary").await { s.color_bg_secondary = v; }
     if let Some(v) = get_setting(pool, "color_bg_hover").await { s.color_bg_hover = v; }
+    if let Some(v) = get_setting(pool, "color_bg_card").await { s.color_bg_card = v; }
+    if let Some(v) = get_setting(pool, "color_text_secondary").await { s.color_text_secondary = v; }
     if let Some(v) = get_setting(pool, "color_text").await { s.color_text = v; }
     if let Some(v) = get_setting(pool, "color_border").await { s.color_border = v; }
     if let Some(v) = get_setting(pool, "quiet_until").await { s.quiet_until = v; }
     if let Some(v) = get_setting(pool, "context_notifications").await { s.context_notifications = v != "false"; }
     if let Some(v) = get_setting(pool, "ai_fallback").await { s.ai_fallback = v == "true"; }
+    if let Some(v) = get_setting(pool, "custom_theme_presets").await { s.custom_theme_presets = v; }
     if let Some(v) = get_setting(pool, "app_category_rules").await { s.app_category_rules = v; }
     if let Some(v) = get_setting(pool, "app_limits").await { s.app_limits = v; }
     if let Some(v) = get_setting(pool, "auto_backup_dir").await { s.auto_backup_dir = v; }
@@ -339,6 +360,8 @@ pub async fn save_settings(
     set_setting(pool.inner(), "color_bg", &settings.color_bg).await?;
     set_setting(pool.inner(), "color_bg_secondary", &settings.color_bg_secondary).await?;
     set_setting(pool.inner(), "color_bg_hover", &settings.color_bg_hover).await?;
+    set_setting(pool.inner(), "color_bg_card", &settings.color_bg_card).await?;
+    set_setting(pool.inner(), "color_text_secondary", &settings.color_text_secondary).await?;
     set_setting(pool.inner(), "color_text", &settings.color_text).await?;
     set_setting(pool.inner(), "color_border", &settings.color_border).await?;
     // Notification pause: empty means off; otherwise only valid RFC3339
@@ -361,6 +384,16 @@ pub async fn save_settings(
         settings.app_category_rules.as_str()
     };
     set_setting(pool.inner(), "app_category_rules", rules).await?;
+    // Saved colour sets: same contract — only a valid JSON array is stored, so a
+    // malformed value cannot make the settings screen unopenable next launch.
+    let presets = if settings.custom_theme_presets.trim().is_empty()
+        || is_json_array(&settings.custom_theme_presets)
+    {
+        settings.custom_theme_presets.as_str()
+    } else {
+        "" // junk is not saved
+    };
+    set_setting(pool.inner(), "custom_theme_presets", presets).await?;
     // Category limits: same logic — junk is not saved
     let limits = if crate::commands::monitor::parse_app_limits(&settings.app_limits).is_empty()
         && !settings.app_limits.trim().is_empty()
@@ -465,6 +498,31 @@ mod db_tests {
         set_setting(&pool, "color_accent_secondary", "#f43f5e").await.unwrap();
         let s = load_settings_raw(&pool).await.unwrap();
         assert_eq!(s.color_accent_secondary, "#f43f5e");
+    }
+
+    #[tokio::test]
+    async fn custom_theme_presets_default_empty_and_roundtrip() {
+        let pool = test_pool().await;
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert_eq!(s.custom_theme_presets, "", "без сохранённых наборов ключ пуст");
+
+        let json = r##"[{"name":"Ночной","colors":{"color_accent":"#123456"}}]"##;
+        set_setting(&pool, "custom_theme_presets", json).await.unwrap();
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert_eq!(s.custom_theme_presets, json);
+    }
+
+    #[test]
+    fn only_json_arrays_pass_the_presets_shape_check() {
+        // The guard that keeps a malformed value out of the DB: anything that is
+        // not an array would come back as an empty list next launch anyway, so
+        // storing it only hides the loss until then.
+        assert!(is_json_array("[]"));
+        assert!(is_json_array(r#"[{"name":"a","colors":{}}]"#));
+        assert!(!is_json_array("{}"), "объект — не массив наборов");
+        assert!(!is_json_array("не json"));
+        assert!(!is_json_array("null"));
+        assert!(!is_json_array("\"строка\""));
     }
 
     #[tokio::test]

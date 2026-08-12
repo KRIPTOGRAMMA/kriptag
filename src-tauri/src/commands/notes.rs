@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     fn temp_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("ai-notes-md-test-{}", Uuid::new_v4()))
+        std::env::temp_dir().join(format!("kriptag-md-test-{}", Uuid::new_v4()))
     }
 
     #[tokio::test]

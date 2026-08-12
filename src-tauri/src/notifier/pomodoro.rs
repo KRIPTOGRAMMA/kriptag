@@ -46,7 +46,7 @@ async fn log_completed_work(pool: &SqlitePool) {
 pub struct PomodoroCmdTx(pub tokio::sync::mpsc::UnboundedSender<PomodoroCmd>);
 
 // A persistent snapshot of the cycle, read by the frontend (polling) and by
-// `ai-notes --status`. phase is "work" | "break" | "paused" | "off"; until is the
+// `kriptag --status`. phase is "work" | "break" | "paused" | "off"; until is the
 // RFC3339 end of the current phase (unused by the frontend for "paused"/"off",
 // but we still write the last meaningful value just in case).
 async fn persist_state(pool: &SqlitePool, phase: &str, until: chrono::DateTime<chrono::Utc>) {

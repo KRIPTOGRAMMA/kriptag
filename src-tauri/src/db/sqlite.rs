@@ -53,7 +53,7 @@ mod tests {
     // test against a temporary file rather than sqlite::memory:.
     fn temp_db_url() -> (String, std::path::PathBuf) {
         let path = std::env::temp_dir()
-            .join(format!("ai-notes-test-{}.db", uuid::Uuid::new_v4()));
+            .join(format!("kriptag-test-{}.db", uuid::Uuid::new_v4()));
         (format!("sqlite:{}?mode=rwc", path.display()), path)
     }
 

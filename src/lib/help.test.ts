@@ -39,7 +39,7 @@ describe("HELP_TOPICS", () => {
   });
 
   // Paths depend on the OS and on the application's identifier — a hardcoded
-  // `~/.local/share/ai-notes/...` turned out to be wrong on every OS.
+  // `~/.local/share/kriptag/...` turned out to be wrong on every OS.
   it("не содержит захардкоженных путей", () => {
     const text = HELP_TOPICS
       .flatMap(t => t.items.map(i => i.desc))

@@ -712,7 +712,12 @@ mod tests {
         let mut ct = new_task("ежедневная с чеклистом");
         ct.recurrence = Some(Recurrence::Custom(1, RecurrenceUnit::Days));
         let t = create_task_impl(&pool, ct).await.unwrap();
+        // TWO subtasks, one ticked. With a single one, ticking it would itself
+        // complete the task (subtasks.rs::complete_if_all_subtasks_done) and clear
+        // the checklist, so the state this test wants to set up would be gone
+        // before complete_task_impl below was ever called.
         let a = add_subtask_impl(&pool, &t.id, "пункт").await.unwrap();
+        add_subtask_impl(&pool, &t.id, "второй пункт").await.unwrap();
         toggle_subtask_impl(&pool, &a.id).await.unwrap();
         assert!(get_subtasks_impl(&pool, &t.id).await.unwrap()[0].done);
 
@@ -854,7 +859,12 @@ mod tests {
         ct.recurrence = Some(Recurrence::Daily);
         let t = create_task_impl(&pool, ct).await.unwrap();
 
+        // TWO subtasks: ticking the only one would auto-complete the task here
+        // (subtasks.rs::complete_if_all_subtasks_done) and clear the checklist
+        // before the trigger below is even installed, so the failure this test
+        // injects would have nothing left to roll back.
         let sub = crate::commands::subtasks::add_subtask_impl(&pool, &t.id, "шаг").await.unwrap();
+        crate::commands::subtasks::add_subtask_impl(&pool, &t.id, "второй шаг").await.unwrap();
         crate::commands::subtasks::toggle_subtask_impl(&pool, &sub.id).await.unwrap();
 
         sqlx::query(

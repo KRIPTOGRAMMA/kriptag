@@ -81,8 +81,8 @@
   }
   /* Recording is the one state that must be noticeable from across the window. */
   .voice-btn.recording {
-    color: #dc2626;
-    border-color: #dc2626;
+    color: var(--danger);
+    border-color: var(--danger);
     animation: voice-pulse 1.4s ease-in-out infinite;
   }
   @keyframes voice-pulse {

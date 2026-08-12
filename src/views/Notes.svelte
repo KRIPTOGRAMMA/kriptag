@@ -12,6 +12,8 @@
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "../lib/components/Icon.svelte";
   import VoiceButton from "../lib/components/VoiceButton.svelte";
+  import Select from "../lib/components/Select.svelte";
+  import ContextMenu, { type MenuItem } from "../lib/components/ContextMenu.svelte";
   import type { Note, NoteRevision } from "../lib/types";
   import { localDateKey, toLocalInput, localeTag } from "../lib/datetime";
   import { isTypingTarget, actionForKey, nextIndex, reconcileIndex } from "../lib/listnav";
@@ -645,6 +647,36 @@
   // directly in the HTML.
   let exporting = $state(false);
 
+  // The editor header's overflow menu. Anchored under the "…" button rather than
+  // at a cursor position: it is opened by a click on a control, not by a right
+  // click on a row, so it has to line up with that control on every open.
+  let noteMenu = $state<{ x: number; y: number } | null>(null);
+
+  function openNoteMenu(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Left edge of the button, just below it. ContextMenu flips this back into
+    // the window itself if the menu would not fit.
+    noteMenu = { x: r.left, y: r.bottom + 4 };
+  }
+
+  // Built where it is used rather than inlined in the markup: the disabled flags
+  // come from four separate in-flight states, and repeating those conditions in
+  // the template is what made the icon row hard to read in the first place.
+  const noteMenuItems: MenuItem[] = $derived([
+    ...(aiEnabled ? [{
+      label: t("ИИ предложит заметки для связи"),
+      disabled: linkSuggesting,
+      onSelect: suggestLinks,
+    }] : []),
+    { label: t("Версии заметки"), onSelect: openRevisions },
+    ...(aiEnabled ? [
+      { label: t("ИИ: резюме заметки"), disabled: summarizing, onSelect: summarizeNote },
+      { label: t("ИИ: извлечь задачи из заметки"), disabled: extractingTasks, onSelect: extractTasks },
+    ] : []),
+    { label: t("Экспорт в HTML"), disabled: exporting, separated: true, onSelect: exportNoteAsHtml },
+    { label: t("Удалить заметку"), danger: true, separated: true, onSelect: deleteSelected },
+  ]);
+
   async function embedImages(html: string): Promise<string> {
     const filenames = new Set<string>();
     for (const m of html.matchAll(/<img[^>]+src="([^"]+)"/g)) {
@@ -817,7 +849,7 @@ ${bodyHtml}
     <div class="list-head">
       <button class="btn-primary btn-sm" style="width:100%;" onclick={newNote}>{t("+ Новая заметка")}</button>
       <button class="btn-ghost btn-sm" style="width:100%;" onclick={openDailyNote}><Icon name="calendar" size={12} /> {t("Сегодня")}</button>
-      <div class="seg">
+      <div class="seg seg-list">
         <button class:active={listSubView === "notes"} onclick={() => listSubView = "notes"}>{t("Заметки")}</button>
         <button class:active={listSubView === "trash"} onclick={() => { listSubView = "trash"; noteStore.loadDeleted(); }}>{t("Корзина")}</button>
       </div>
@@ -928,7 +960,12 @@ ${bodyHtml}
        of bug that was fixed for switching between notes. -->
   <div class="editor-pane" class:zen={zenMode}>
     {#if !selected}
-      <div class="empty" style="margin:auto;">{t("Выберите заметку или создайте новую")}</div>
+      <!-- The window buttons float over the top-right corner (WindowControls is
+           position:fixed and transparent). With a note open .editor-head reserves
+           room for them; with none, this branch is all there is, so the reservation
+           has to live here too — otherwise the buttons sit on bare pane background
+           and read as covered by it. -->
+      <div class="empty empty-editor">{t("Выберите заметку или создайте новую")}</div>
     {:else}
       <div class="editor-head">
         <input class="title-input" bind:value={editTitle} oninput={scheduleSave} placeholder={t("Название")} />
@@ -938,28 +975,28 @@ ${bodyHtml}
         {#if renameToast}
           <span class="rename-toast">{renameToast}</span>
         {/if}
-        {#if !zenMode && aiEnabled}
-          <button class="btn-icon" disabled={linkSuggesting} title={t("ИИ предложит заметки для связи")}
-            onclick={suggestLinks}>{#if linkSuggesting}…{:else}<Icon name="sparkles" />{/if}</button>
-        {/if}
+        <!-- Six icons in a row used to sit directly under the three window buttons,
+             at the same size and spacing: the two groups read as one strip and it
+             was not clear which belonged to the note. Everything but zen mode now
+             lives behind "…", which shows the actions as words — a hover-only
+             panel was considered and rejected for the same reason the task row's
+             icons were dropped in v0.9.98: it hides them from the keyboard and
+             from anyone who does not happen to point at the right corner. -->
         {#if !zenMode}
-          <button class="btn-icon" title={t("Версии заметки")} onclick={openRevisions}><Icon name="clock" /></button>
-          {#if aiEnabled}
-            <button class="btn-icon" disabled={summarizing} title={t("ИИ: резюме заметки")} onclick={summarizeNote}>
-              {#if summarizing}…{:else}<Icon name="sparkles" />{/if}
-            </button>
-            <button class="btn-icon" disabled={extractingTasks} title={t("ИИ: извлечь задачи из заметки")} onclick={extractTasks}>
-              {#if extractingTasks}…{:else}<Icon name="checklist" />{/if}
-            </button>
-          {/if}
-          <button class="btn-icon" disabled={exporting} title={t("Экспорт в HTML")} onclick={exportNoteAsHtml}><Icon name="export" /></button>
+          <button
+            class="btn-icon note-more"
+            title={t("Действия с заметкой")}
+            aria-label={t("Действия с заметкой")}
+            aria-haspopup="menu"
+            onclick={openNoteMenu}
+          >⋯</button>
         {/if}
+        <!-- Zen stays outside the menu: it is the one action used while reading
+             rather than while managing the note, and it has to toggle back from
+             inside zen mode, where the rest of the header is hidden. -->
         <button class="btn-icon" title={zenMode ? t("Выйти из zen-режима (Esc)") : t("Zen-режим (Ctrl+Shift+Z)")} onclick={toggleZen}>
           <Icon name={zenMode ? "collapse" : "expand"} />
         </button>
-        {#if !zenMode}
-          <button class="btn-icon btn-danger" title={t("Удалить заметку")} onclick={deleteSelected}>✕</button>
-        {/if}
       </div>
 
       {#if !zenMode && linkSuggestions && linkSuggestions.noteId === selectedId}
@@ -1042,15 +1079,24 @@ ${bodyHtml}
       <!-- Meta: the task link and tags, hidden in zen mode -->
       {#if !zenMode}
         <div class="editor-meta">
-          <label class="meta-label">
+          <!-- A span, not a label: the control is a button, and a label wrapping it
+               would reopen the dropdown on every click of the caption.
+               "" stands in for null across the component boundary — Select works in
+               strings, while an unlinked note stores null. -->
+          <span class="meta-label">
             {t("Задача:")}
-            <select bind:value={editLinkedTaskId} onchange={saveMeta}>
-              <option value={null}>{t("— не привязана —")}</option>
-              {#each taskStore.activeTasks as t (t.id)}
-                <option value={t.id}>{t.title}</option>
-              {/each}
-            </select>
-          </label>
+            <span class="meta-select">
+              <Select
+                value={editLinkedTaskId ?? ""}
+                ariaLabel={t("Задача:")}
+                onChange={(v) => { editLinkedTaskId = v || null; saveMeta(); }}
+                options={[
+                  { value: "", label: t("— не привязана —") },
+                  ...taskStore.activeTasks.map(x => ({ value: x.id, label: x.title })),
+                ]}
+              />
+            </span>
+          </span>
           {#if projectStore.projects.length > 0}
             <label class="meta-label">
               {t("Проект:")}
@@ -1165,6 +1211,15 @@ ${bodyHtml}
   </div>
 </div>
 
+{#if noteMenu}
+  <ContextMenu
+    x={noteMenu.x}
+    y={noteMenu.y}
+    items={noteMenuItems}
+    onClose={() => noteMenu = null}
+  />
+{/if}
+
 {#if revisionsOpen}
   <div class="backdrop" role="presentation" onclick={closeRevisions} onkeydown={(e) => e.key === "Escape" && closeRevisions()}>
     <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1251,6 +1306,18 @@ ${bodyHtml}
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  /* The toggle fills the column like the buttons above it, and the two halves
+     split it evenly. .seg is inline-flex by default, so it shrank to its labels
+     and sat short of the column's right edge — "Корзина" is the longer word, so
+     the halves came out uneven as well. */
+  .seg-list {
+    display: flex;
+  }
+
+  .seg-list button {
+    flex: 1;
   }
 
   .filter-input {
@@ -1429,8 +1496,11 @@ ${bodyHtml}
     color: var(--text-primary);
   }
 
+  /* The quick slot takes the second accent, the same as in Tasks: it is a state
+     of the item, not the user's current selection. Was a literal #d9a441, which
+     followed neither the theme nor the chosen accent. */
   .slot-btn.pinned {
-    color: #d9a441;
+    color: var(--accent-secondary);
   }
 
   .pin-btn:hover {
@@ -1442,11 +1512,20 @@ ${bodyHtml}
     color: var(--accent);
   }
 
+  /* min-height: 0 down the whole column: each of these is a flex item whose
+     default min-height: auto would let it grow to its content instead of being
+     bounded by the window. The editor's scroller can only work if every ancestor
+     between it and .notes is allowed to shrink. */
   .editor-pane {
     flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
+  }
+
+  .empty-editor {
+    margin: auto;
   }
 
   .editor-pane.zen {
@@ -1462,9 +1541,6 @@ ${bodyHtml}
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    /* see Tasks.svelte: room for the window buttons — the editor occupies the
-       right side of the window and its header runs straight into them. */
-    padding-right: var(--wincontrols-w);
     border-bottom: 1px solid var(--border);
   }
 
@@ -1629,6 +1705,13 @@ ${bodyHtml}
     padding: 2px 6px;
   }
 
+  /* The task link is a Select component; the project below is still a native
+     <select>. Same width so the two sit level in the meta row. */
+  .meta-select {
+    display: block;
+    width: 200px;
+  }
+
   .tags {
     display: flex;
     align-items: center;
@@ -1663,6 +1746,7 @@ ${bodyHtml}
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
   }
 
   .backlinks {

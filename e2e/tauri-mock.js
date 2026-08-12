@@ -32,6 +32,8 @@
     color_bg: "",
     color_bg_secondary: "",
     color_bg_hover: "",
+    color_bg_card: "",
+    color_text_secondary: "",
     color_text: "",
     color_border: "",
     quiet_until: "",
@@ -39,6 +41,7 @@
     ai_fallback: false,
     openai_in_keyring: false,
     anthropic_in_keyring: false,
+    custom_theme_presets: "",
     app_category_rules: "",
     auto_backup_dir: "",
     auto_backup_keep: 7,
@@ -137,7 +140,9 @@
       db.settings = { ...db.settings, ...settings };
       persist();
     },
-    is_wayland: () => false,
+    // Тест страницы биндов композитора выставляет window.__forceWayland: это
+    // единственный шаг онбординга, которого на не-Wayland быть не должно.
+    is_wayland: () => window.__forceWayland === true,
     get_tracking_mode: () => "basic",
     get_window_tracking: () => db.windowTracking ?? null,
     record_input: () => {},
@@ -378,7 +383,25 @@
     toggle_subtask: ({ id }) => {
       for (const t of db.tasks) {
         const s = t.subtasks.find((s) => s.id === id);
-        if (s) { s.done = !s.done; persist(); return; }
+        if (!s) continue;
+        s.done = !s.done;
+        persist();
+        // Зеркало бэкенда: отметил последнюю подзадачу — задача выполнена
+        // (subtasks.rs::complete_if_all_subtasks_done). Ветку про повторы и
+        // блокировки не дублируем — она уже внутри complete_task, вызываем его.
+        // Зеркало бэкенда: у повтора чек-лист из ОДНОГО пункта не автозакрывает
+        // задачу. Завершение повтора снимает все галочки, поэтому следующая
+        // отметка снова была бы «последней» — и каждый круг двигал дедлайн и
+        // сбрасывал notified_*, то есть заново ставил задачу в очередь уведомлений.
+        const repeats = t.recurrence && t.recurrence !== "None";
+        if (t.subtasks.length > 0 && t.subtasks.every((x) => x.done)
+            && !(repeats && t.subtasks.length < 2)
+            && !t.hidden && !t.deleted_at) {
+          // Заблокированную задачу закрыть нельзя, но правка чек-листа при этом
+          // должна уцелеть — в Rust это `let _ =`, здесь try/catch.
+          try { commands.complete_task({ id: t.id }); } catch { /* остаётся открытой */ }
+        }
+        return;
       }
     },
     delete_subtask: ({ id }) => {
@@ -770,8 +793,8 @@
     // v0.9.64: путь зависит от типа модели.
     model_path: ({ kind }) =>
       kind === "whisper"
-        ? "/home/user/.local/share/com.ainotes.app/models/whisper.bin"
-        : "/home/user/.local/share/com.ainotes.app/models/model.gguf",
+        ? "/home/user/.local/share/com.kriptag.app/models/whisper.bin"
+        : "/home/user/.local/share/com.kriptag.app/models/model.gguf",
     // v0.9.64: каталог зависит от kind, и мок различает его нарочно — иначе тест
     // не заметил бы, что фронтенд перестал передавать тип и оба загрузчика
     // показывают один и тот же список.
@@ -822,7 +845,7 @@
       newest: "2026-07-17T16:00:00+00:00",
       losing_tasks: 0, losing_notes: 0,
     },
-    do_auto_backup: () => "ai-notes-backup-2026-07-17-1600.zip",
+    do_auto_backup: () => "kriptag-backup-2026-07-17-1600.zip",
 
     // --- трекинг ---
     start_task_tracking: ({ taskId }) => {

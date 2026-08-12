@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { loadUiState, saveUiState, restoreValid, restoreOneOf } from "./uistate";
+import { loadUiState, saveUiState, restoreValid, restoreOneOf, restoreNumber, restoreNumberMap } from "./uistate";
 
 const LS_KEY = "ui_state";
 
@@ -104,5 +104,54 @@ describe("restoreOneOf", () => {
   it("rejects a value outside the set", () => {
     expect(restoreOneOf("kanban", MODES, "list")).toBe("list");
     expect(restoreOneOf(undefined, MODES, "list")).toBe("list");
+  });
+});
+
+describe("restoreNumber", () => {
+  const MIN = 180, MAX = 520, DEF = 260;
+
+  it("restores a value inside the range", () => {
+    expect(restoreNumber(300, MIN, MAX, DEF)).toBe(300);
+    expect(restoreNumber(MIN, MIN, MAX, DEF)).toBe(MIN);
+    expect(restoreNumber(MAX, MIN, MAX, DEF)).toBe(MAX);
+  });
+
+  // Clamps rather than resetting: a width past the edge is still a meaningful
+  // intent, and the nearest allowed one is closer to it than the default is.
+  it("прижимает значение к границам диапазона", () => {
+    expect(restoreNumber(40, MIN, MAX, DEF)).toBe(MIN);
+    expect(restoreNumber(9999, MIN, MAX, DEF)).toBe(MAX);
+  });
+
+  // Anything that is not a finite number comes from a hand-edited store.
+  it("откатывается к умолчанию на не-числах", () => {
+    expect(restoreNumber(undefined, MIN, MAX, DEF)).toBe(DEF);
+    expect(restoreNumber(null, MIN, MAX, DEF)).toBe(DEF);
+    expect(restoreNumber("300", MIN, MAX, DEF)).toBe(DEF);
+    expect(restoreNumber(NaN, MIN, MAX, DEF)).toBe(DEF);
+    expect(restoreNumber(Infinity, MIN, MAX, DEF)).toBe(DEF);
+  });
+});
+
+describe("restoreNumberMap", () => {
+  const MIN = 180, MAX = 520;
+
+  it("clamps every entry", () => {
+    expect(restoreNumberMap({ Todo: 300, Done: 40, Wip: 9999 }, MIN, MAX))
+      .toEqual({ Todo: 300, Done: MIN, Wip: MAX });
+  });
+
+  // A status can be deleted between launches; one bad entry must not cost the
+  // rest their widths.
+  it("отбрасывает нечисловые значения, сохраняя остальные", () => {
+    expect(restoreNumberMap({ Todo: 300, Bad: "широко", Worse: null }, MIN, MAX))
+      .toEqual({ Todo: 300 });
+  });
+
+  it("возвращает пустую карту на не-объектах", () => {
+    expect(restoreNumberMap(undefined, MIN, MAX)).toEqual({});
+    expect(restoreNumberMap(null, MIN, MAX)).toEqual({});
+    expect(restoreNumberMap([260], MIN, MAX)).toEqual({});
+    expect(restoreNumberMap("260", MIN, MAX)).toEqual({});
   });
 });
