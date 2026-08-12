@@ -13,14 +13,10 @@
 // the wrong name reads as "sidecar missing".
 
 import { createWriteStream } from "node:fs";
-import { mkdir, rm, readdir, rename, chmod, stat, writeFile } from "node:fs/promises";
+import { mkdir, chmod, stat, writeFile, readFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { join } from "node:path";
-
-const run = promisify(execFile);
 
 // Collected so the script can end with a non-zero status when something a build
 // actually needs is absent.
@@ -90,20 +86,10 @@ async function fetchWhisper({ triple, exe }) {
   console.log("      cmake --build build -j --config Release");
   console.log(`      cp build/bin/whisper-cli ../${dest}`);
   console.log("");
-  console.log("    Voice input is optional: the app builds and runs without it.");
+  console.log("    Voice input is optional: everything else works without it.");
   missing.push(`whisper-cli-${triple}${exe}`);
 }
 
-async function find(dir, name) {
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const p = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const hit = await find(p, name);
-      if (hit) return hit;
-    } else if (entry.name === name) return p;
-  }
-  return null;
-}
 
 // The wrapper exists because llamafile insists on writing into the working
 // directory; it is a shell script on Unix and a .cmd on Windows.
@@ -136,9 +122,23 @@ await fetchLlamafile(target);
 await fetchWhisper(target);
 await writeWrapper(target);
 
+// externalBin is a list of files the bundler *must* find: a missing one aborts
+// the build. whisper-cli is the only optional sidecar, so when it is absent the
+// entry is dropped from the config rather than left to fail the build. The
+// backend already handles its absence at runtime — voice.rs returns an error the
+// UI shows — so the package is simply one without voice input.
+if (missing.some((m) => m.startsWith("whisper-cli"))) {
+  const confPath = "src-tauri/tauri.conf.json";
+  const conf = JSON.parse(await readFile(confPath, "utf8"));
+  const before = conf.bundle.externalBin.length;
+  conf.bundle.externalBin = conf.bundle.externalBin.filter((b) => !b.includes("whisper-cli"));
+  if (conf.bundle.externalBin.length !== before) {
+    await writeFile(confPath, JSON.stringify(conf, null, 2) + "\n");
+    console.log("\n  ~ whisper-cli dropped from externalBin — building without voice input.");
+  }
+}
+
 if (missing.length) {
   console.log(`\nMissing: ${missing.join(", ")} — see the note above.`);
-  // Not an error exit: voice input is optional and the package builds without
-  // it. CI decides for itself whether to treat this as fatal.
 }
 console.log("Done.");

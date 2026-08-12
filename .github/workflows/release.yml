@@ -54,13 +54,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: the runners now force Node 20 actions onto 24 and warn
+          # about it, so pinning 20 buys nothing.
+          node-version: 22
           cache: npm
 
       - run: npm ci
 
       # src-tauri/binaries/ is gitignored (llamafile alone is ~300 MB), so a
       # clean checkout has no sidecars and the bundler fails hard without them.
+      # src-tauri/binaries/ is gitignored (llamafile alone is ~200 MB), so a clean
+      # checkout has no sidecars and the bundler fails hard without them. The
+      # script also drops whisper-cli from externalBin when it cannot be
+      # provided, which is why this must run before the build.
       - name: Fetch sidecars
         run: node scripts/fetch-sidecars.mjs
 
