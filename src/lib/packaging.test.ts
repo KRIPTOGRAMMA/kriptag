@@ -99,6 +99,34 @@ describe("метаданные пакета", () => {
     expect(LICENSE["/LICENSE"], "в тексте остался placeholder [yyyy]").not.toContain("[yyyy]");
   });
 
+  it("сайдкары не отслеживаются git", async () => {
+    // Sidecars are downloaded by scripts/fetch-sidecars.mjs, and src-tauri/binaries/
+    // is in .gitignore — but .gitignore has no effect on a file that is already in
+    // the index, and one wrapper script got in before the rule existed. It survived
+    // there for months and broke CI twice in a row, in a way that reads as the
+    // opposite of what it is: the fetch script finds a file of that name already
+    // present, reports "already here", and skips the download. The bundler then
+    // aborts on the real binary being missing.
+    //
+    // This has to ask git rather than the filesystem: on a developer machine the
+    // directory is correctly full of binaries, and only the index tells tracked
+    // apart from untracked. Hence git itself — nothing else here reaches the index.
+    //
+    // The import is dynamic and typed by hand because the frontend tsconfig
+    // carries no @types/node and pins `types: ["vite/client"]`: a plain
+    // `import ... from "node:child_process"` fails svelte-check. Widening the
+    // project-wide type set for one test would hand Node APIs to every .svelte
+    // file, which is precisely what that config is keeping out.
+    // The specifier is assembled at runtime so that svelte-check does not try to
+    // resolve it statically; vitest runs in Node and resolves it fine.
+    const mod = "node:child" + "_process";
+    const { execSync } = (await import(/* @vite-ignore */ mod)) as {
+      execSync: (cmd: string, opts: { encoding: string }) => string;
+    };
+    const tracked = execSync("git ls-files src-tauri/binaries/", { encoding: "utf8" }).trim();
+    expect(tracked, "сайдкар попал в индекс git — в чистом клоне он подменит скачивание").toBe("");
+  });
+
   it("версии во всех трёх манифестах совпадают", () => {
     const pkg = JSON.parse(FILES["/package.json"]) as Record<string, string>;
     const conf = tauriConf() as Record<string, string>;
