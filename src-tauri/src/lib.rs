@@ -631,7 +631,11 @@ pub fn run() {
 
             // Extended tracking: system idle/resume from the compositor. Where it
             // is unsupported (X11, an older compositor) we use the basic mode.
+            #[cfg(target_os = "linux")]
             let extended = is_wayland() && monitor::wayland_idle::start(tracker.clone());
+            // Elsewhere there is no compositor to ask, so tracking stays basic.
+            #[cfg(not(target_os = "linux"))]
+            let extended = false;
             app.manage(ExtendedTracking(extended));
             eprintln!("[monitor] режим трекинга: {}", if extended { "расширенный (ext-idle-notify)" } else { "базовый (окно в фокусе)" });
 

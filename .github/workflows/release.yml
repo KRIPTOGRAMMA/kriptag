@@ -43,7 +43,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libssl-dev
+            libssl-dev \
+            libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -61,9 +62,7 @@ jobs:
 
       - run: npm ci
 
-      # src-tauri/binaries/ is gitignored (llamafile alone is ~300 MB), so a
-      # clean checkout has no sidecars and the bundler fails hard without them.
-      # src-tauri/binaries/ is gitignored (llamafile alone is ~200 MB), so a clean
+      # src-tauri/binaries/ is gitignored (llamafile alone is ~350 MB), so a clean
       # checkout has no sidecars and the bundler fails hard without them. The
       # script also drops whisper-cli from externalBin when it cannot be
       # provided, which is why this must run before the build.
@@ -99,9 +98,17 @@ jobs:
           releaseName: Kriptag ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
-          # The Linux targets come from tauri.conf.json; Windows needs its own,
-          # and NSIS produces the familiar setup .exe.
-          args: ${{ matrix.target == 'windows' && '--bundles nsis' || '' }}
+          # Both platforms name their bundle explicitly rather than inheriting
+          # tauri.conf.json's targets, which also list appimage.
+          #
+          # AppImage is deliberately excluded until it is known to work. It has
+          # never been built successfully here: linuxdeploy's gtk plugin asks
+          # pkg-config for the gdk-pixbuf loader directory and copies it, and on
+          # a distro where that path is declared but absent the plugin exits 1
+          # and takes the whole build with it — so a working .deb is lost to a
+          # bundle nobody has yet shipped. It also embeds the ~350 MB llamafile
+          # a second time. Re-add once an AppImage has actually been produced.
+          args: ${{ matrix.target == 'windows' && '--bundles nsis' || '--bundles deb' }}
 
       # Kept even for manual runs: without an artifact there is nothing to
       # inspect when a build behaves differently from the local one.

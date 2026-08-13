@@ -42,8 +42,6 @@ tauri-plugin-clipboard-manager = "2"
 thiserror = "2.0.18"
 keyring = "4.1.2"
 tauri-plugin-single-instance = "2.4.3"
-wayland-client = "0.31.14"
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 base64 = "0.22"
 cpal = "0.18.1"
 hound = "3.5.1"
@@ -54,3 +52,9 @@ hound = "3.5.1"
 # the protocol, so on Linux we call it directly; see notifier/actions.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4"
+# Wayland is a Linux display protocol, and these crates are written against it:
+# wayland-sys reaches for std::os::unix, which does not exist on Windows, so as
+# an unconditional dependency it fails the Windows build before any code of ours
+# is compiled. Used by monitor::wayland_idle, which is gated the same way.
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
