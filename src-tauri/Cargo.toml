@@ -43,7 +43,13 @@ thiserror = "2.0.18"
 keyring = "4.1.2"
 tauri-plugin-single-instance = "2.4.3"
 base64 = "0.22"
-cpal = "0.18.1"
+# Pinned below 0.18 on purpose. cpal 0.18 wants windows-core 0.62 while tao (via
+# tauri) is on 0.61, and two copies of that crate in one graph make its Interface
+# trait two unrelated types — cpal itself then fails to compile on Windows with a
+# wall of mismatched-type errors. Linux never sees this. Raise only once tauri
+# has moved to windows-core 0.62; the API differs slightly (build_input_stream
+# takes the config by reference here, by value in 0.18).
+cpal = "0.17"
 hound = "3.5.1"
 
 # Buttons in notifications: tauri-plugin-notification accepts them in its builder

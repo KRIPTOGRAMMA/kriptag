@@ -95,7 +95,7 @@ pub fn start() -> Result<Recording, String> {
     let source_rate = config.sample_rate();
     let source_channels = config.channels();
     let sample_format = config.sample_format();
-    // Consumed by build_input_stream, so the format is read off before the move.
+    // config is consumed by the conversion, so the format is read off beforehand.
     let stream_config: cpal::StreamConfig = config.into();
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -111,7 +111,7 @@ pub fn start() -> Result<Recording, String> {
         cpal::SampleFormat::F32 => Box::new(
             device
                 .build_input_stream(
-                    stream_config.clone(),
+                    &stream_config,
                     move |data: &[f32], _: &_| buf.lock().unwrap().extend_from_slice(data),
                     err_fn,
                     None,
@@ -121,7 +121,7 @@ pub fn start() -> Result<Recording, String> {
         cpal::SampleFormat::I16 => Box::new(
             device
                 .build_input_stream(
-                    stream_config.clone(),
+                    &stream_config,
                     move |data: &[i16], _: &_| {
                         let mut b = buf.lock().unwrap();
                         b.extend(data.iter().map(|s| *s as f32 / i16::MAX as f32));
@@ -134,7 +134,7 @@ pub fn start() -> Result<Recording, String> {
         cpal::SampleFormat::U16 => Box::new(
             device
                 .build_input_stream(
-                    stream_config.clone(),
+                    &stream_config,
                     move |data: &[u16], _: &_| {
                         let mut b = buf.lock().unwrap();
                         // u16 is unsigned with silence at the midpoint, not at zero.
