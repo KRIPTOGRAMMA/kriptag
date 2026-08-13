@@ -82,8 +82,13 @@ async function fetchWhisper({ triple, exe }) {
   console.log("");
   console.log("      git clone https://github.com/ggerganov/whisper.cpp");
   console.log("      cd whisper.cpp");
-  console.log("      cmake -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release");
+  console.log(`      git checkout ${WHISPER_VERSION}`);
+  console.log("      cmake -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \\");
+  console.log("            -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF");
   console.log("      cmake --build build -j --config Release");
+  console.log("");
+  console.log("    GGML_NATIVE=OFF matters: the default is -march=native, which bakes in");
+  console.log("    whatever the building machine supports and dies with SIGILL elsewhere.");
   console.log(`      cp build/bin/whisper-cli ../${dest}`);
   console.log("");
   console.log("    Voice input is optional: everything else works without it.");

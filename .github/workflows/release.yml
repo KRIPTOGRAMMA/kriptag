@@ -44,7 +44,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libgdk-pixbuf-2.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -61,6 +62,49 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # whisper-cli is built from source because upstream only publishes
+      # shared-library archives: the binary needs a dozen .so files beside it,
+      # and a Tauri sidecar is a single file with nowhere to put them.
+      #
+      # The cache key is the version alone — the output depends on nothing else
+      # in this repo, so it is compiled once and reused until v1.9.2 changes.
+      - name: Cache whisper-cli
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/whisper-cli-*
+          key: whisper-v1.9.2-${{ matrix.os }}
+
+      # GGML_NATIVE=OFF is not optional: the default -march=native targets the
+      # runner's own CPU, and the resulting binary dies with SIGILL on any older
+      # machine that installs the package.
+      - name: Build whisper-cli
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v1.9.2 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+          cmake -S /tmp/whisper.cpp -B /tmp/whisper.cpp/build \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF
+          cmake --build /tmp/whisper.cpp/build -j --config Release
+          mkdir -p src-tauri/binaries
+          # The Visual Studio generator is multi-config and puts the binary in
+          # bin/Release/, while Makefiles put it in bin/ — find it rather than
+          # assume, so a generator change cannot silently break the copy.
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            src=$(find /tmp/whisper.cpp/build -name whisper-cli.exe -type f | head -1)
+            dest=src-tauri/binaries/whisper-cli-x86_64-pc-windows-msvc.exe
+          else
+            src=$(find /tmp/whisper.cpp/build -name whisper-cli -type f | head -1)
+            dest=src-tauri/binaries/whisper-cli-x86_64-unknown-linux-gnu
+          fi
+          # An empty $src would make cp fail obscurely, or worse, succeed at
+          # copying nothing; the build must stop here instead.
+          test -n "$src" || { echo "whisper-cli not found under build/"; exit 1; }
+          cp "$src" "$dest"
+          chmod +x "$dest"
+          echo "whisper-cli: $src -> $dest"
 
       # src-tauri/binaries/ is gitignored (llamafile alone is ~350 MB), so a clean
       # checkout has no sidecars and the bundler fails hard without them. The
@@ -99,16 +143,14 @@ jobs:
           releaseDraft: true
           prerelease: false
           # Both platforms name their bundle explicitly rather than inheriting
-          # tauri.conf.json's targets, which also list appimage.
+          # tauri.conf.json's targets.
           #
-          # AppImage is deliberately excluded until it is known to work. It has
-          # never been built successfully here: linuxdeploy's gtk plugin asks
-          # pkg-config for the gdk-pixbuf loader directory and copies it, and on
-          # a distro where that path is declared but absent the plugin exits 1
-          # and takes the whole build with it — so a working .deb is lost to a
-          # bundle nobody has yet shipped. It also embeds the ~350 MB llamafile
-          # a second time. Re-add once an AppImage has actually been produced.
-          args: ${{ matrix.target == 'windows' && '--bundles nsis' || '--bundles deb' }}
+          # AppImage needs libgdk-pixbuf-2.0-dev above: linuxdeploy's gtk plugin
+          # asks pkg-config for the loader directory and copies it, and where the
+          # path is declared but absent the plugin exits 1 and takes the whole
+          # build with it — losing a working .deb along with it. That is why the
+          # two are listed together and not left to tauri.conf.json.
+          args: ${{ matrix.target == 'windows' && '--bundles nsis' || '--bundles deb,appimage' }}
 
       # Kept even for manual runs: without an artifact there is nothing to
       # inspect when a build behaves differently from the local one.
