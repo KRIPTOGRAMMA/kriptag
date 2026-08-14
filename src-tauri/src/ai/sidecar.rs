@@ -24,7 +24,19 @@ pub type SharedSidecar = Mutex<SidecarState>;
 /// `binaries/` prefix in tauri.conf.json is the layout in the SOURCES and is
 /// correct there — it must not be repeated here. See voice/mod.rs, where the same
 /// mistake broke speech recognition outright.
+///
+/// The wrapper is a Unix shell script whose only job is `cd /tmp`: llamafile
+/// writes into the working directory, which beside the installed binary is either
+/// read-only or the wrong place. On Windows it does not exist — a sidecar there
+/// must be a real PE binary under a `.exe` name, so scripts/fetch-sidecars.mjs
+/// neither writes one nor leaves it in externalBin. Asking for it anyway is what
+/// made the model unusable in the first Windows package: the file is simply not
+/// in the bundle, and the spawn fails with "os error 2". llamafile is an APE
+/// binary that Windows runs directly, so it is called without the wrapper.
+#[cfg(not(target_os = "windows"))]
 const SIDECAR: &str = "llamafile-wrapper";
+#[cfg(target_os = "windows")]
+const SIDECAR: &str = "llamafile";
 
 fn pick_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -108,6 +120,8 @@ async fn wait_for_ready(port: u16) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::SIDECAR;
+
     // Guards EVERY sidecar call in the project, not just this file's.
     //
     // The mistake has now been made twice: it broke speech recognition (fixed by
@@ -150,6 +164,54 @@ mod tests {
             offenders.is_empty(),
             "a sidecar name must be bare; it resolves next to the executable:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    /// The name has to exist in the bundle, not merely be well-formed.
+    ///
+    /// The guard above checks the SHAPE of a sidecar name and passed happily while
+    /// the first Windows package could not run the model at all: it asked for
+    /// `llamafile-wrapper`, a Unix shell script that scripts/fetch-sidecars.mjs
+    /// deliberately does not produce on Windows and strips from externalBin. A
+    /// correctly-spelled name for a file that is not shipped fails exactly like a
+    /// misspelled one — "os error 2" — which is why form alone was not enough.
+    ///
+    /// tauri.conf.json is the source of truth here because it is what the bundler
+    /// reads. Note the fetch script REMOVES entries from it at build time (the
+    /// wrapper on Windows, whisper-cli when it cannot be built), so this asserts
+    /// the opposite direction too: the name this file asks for must survive that
+    /// editing on the platform being compiled for.
+    #[test]
+    fn sidecar_name_is_shipped_on_this_platform() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).expect("tauri.conf.json");
+        let entries: Vec<String> = conf["bundle"]["externalBin"]
+            .as_array()
+            .expect("bundle.externalBin missing")
+            .iter()
+            .map(|e| e.as_str().unwrap_or_default().to_string())
+            .collect();
+
+        // externalBin carries the source-tree prefix (`binaries/llamafile`) while
+        // SIDECAR is the bare resolved name; compare on the last segment.
+        let shipped: Vec<&str> = entries
+            .iter()
+            .map(|e| e.rsplit('/').next().unwrap_or(e))
+            .collect();
+
+        assert!(
+            shipped.contains(&SIDECAR),
+            "sidecar {SIDECAR:?} is not in externalBin {shipped:?} — it will not be in the \
+             package and the spawn fails with os error 2"
+        );
+
+        // The wrapper is a Unix-only shell script. Asking for it on Windows is the
+        // exact bug this test exists for, and it would otherwise pass whenever the
+        // entry is still listed in the unedited config.
+        #[cfg(target_os = "windows")]
+        assert_ne!(
+            SIDECAR, "llamafile-wrapper",
+            "the wrapper is a shell script and is never bundled on Windows"
         );
     }
 }

@@ -52,6 +52,33 @@ describe("кнопки окна", () => {
     expect(SRC).toMatch(/onmousedown/);
   });
 
+  // The drag handler must sit on an element that actually receives the pointer.
+  //
+  // The bar itself carries pointer-events: none on purpose — it is fixed across the
+  // whole top edge, and without that it would swallow the first row of every view.
+  // But the handler was on the bar, and an element that does not receive the
+  // pointer receives no mousedown either: the only draggable spot turned out to be
+  // the button group, the one place where pointer-events are switched back on.
+  // Linux hid this because the window manager drags with Super+mouse anyway; on
+  // Windows there is no such fallback and the window simply would not move.
+  //
+  // Checked as source text because vitest here runs on .ts only — there is no DOM
+  // to ask, and reading the file is what this whole suite already does.
+  it("перетаскивание висит на элементе, принимающем указатель", () => {
+    // The handler is not on .titlebar, whose own rule disables the pointer.
+    const onTheBar = /<div class="titlebar"[^>]*onmousedown/.test(SRC);
+    expect(onTheBar, "onmousedown на .titlebar, где pointer-events: none — тащить нечем").toBe(false);
+
+    // Whatever element does carry it must re-enable the pointer. The class is read
+    // out of the markup rather than hard-coded, so renaming the element does not
+    // quietly turn this test into a no-op.
+    const holder = /<div class="([\w-]+)"[^>]*onmousedown=\{startDrag\}/.exec(SRC);
+    expect(holder, "не найден элемент с onmousedown={startDrag}").toBeTruthy();
+    const cls = holder![1];
+    const rule = new RegExp(`\\.${cls}\\s*\\{[^}]*pointer-events:\\s*auto`, "s");
+    expect(rule.test(SRC), `.${cls} не включает pointer-events: auto — mousedown не дойдёт`).toBe(true);
+  });
+
   // The maximize/restore icon must follow the window's real state: maximizing is
   // possible by double-clicking and through the WM, bypassing these buttons.
   it("состояние «развёрнуто» синхронизируется с окном, а не только с кликами", () => {

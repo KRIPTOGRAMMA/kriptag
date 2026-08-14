@@ -72,8 +72,16 @@
   }
 </script>
 
+<!-- The drag strip is its own element rather than the bar itself. The bar has to
+     keep pointer-events: none so clicks reach the content beneath it, and an
+     element that does not receive the pointer does not receive mousedown either:
+     with the handler on the bar, the only draggable spot was the button group,
+     which is where its pointer-events are re-enabled. On Linux the window
+     manager offers Super+drag as a fallback, so it went unnoticed; Windows has
+     no such gesture and the window could not be moved at all. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="titlebar" onmousedown={startDrag} ondblclick={toggleMaximize}>
+<div class="titlebar">
+  <div class="drag-strip" onmousedown={startDrag} ondblclick={toggleMaximize}></div>
   <div class="controls">
     <button class="win-btn" onclick={minimize} title={t("Свернуть")} aria-label={t("Свернуть")}>
       <Icon name="winmin" size={14} />
@@ -113,10 +121,31 @@
     pointer-events: none;
   }
 
+  /* Fills the bar and takes the pointer back, so the whole top edge drags the
+     window — everywhere except the buttons, which come after it in the flex row
+     and keep their own hit area.
+
+     It stops short of the sidebar on the left: .brand sits at the very top there
+     and the navigation right below it, and a strip over that column would eat
+     the first click on it. 176px is the sidebar's width (App.svelte). The height
+     is the bar's own 32px, and .content is already padded by exactly that much,
+     so the strip covers reserved space only and no view loses its first row. */
+  .drag-strip {
+    position: absolute;
+    top: 0;
+    left: 176px;
+    right: 0;
+    height: 32px;
+    pointer-events: auto;
+  }
+
   .controls {
     display: flex;
     gap: 2px;
     pointer-events: auto;
+    /* Above the strip, which spans the full width beneath them. */
+    position: relative;
+    z-index: 1;
   }
 
   .win-btn {
