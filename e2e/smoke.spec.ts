@@ -1021,6 +1021,89 @@ test("заметка из буфера: пустой буфер даёт обы�
   await expect(page.locator(".error")).toHaveCount(0);
 });
 
+// v0.10.17: режим создания задачи в быстром окне не был покрыт вовсе — тесты
+// ходили только в режим буфера и в закреплённый слот. Переверстка (заголовок
+// ведущим полем, описание всегда на месте, приоритет и категория в подвале)
+// прошла бы незамеченной, сломай она сохранение.
+//
+// Приоритет и категория здесь — свой Select, а не родной <select>: подвал стал
+// заливкой на --bg-card, а именно в тёмной панели попап WebKitGTK оставался
+// белым. Поэтому pickOption (клик по кнопке + клик по пункту), а не
+// selectOption.
+test("быстрый ввод: задача создаётся с приоритетом и категорией из подвала", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
+  await withMock(page);
+  await page.goto("/quick-task.html");
+
+  // Каретка сразу в заголовке: окно открывают, чтобы печатать, а не выбирать.
+  await expect(page.locator(".lead-input")).toBeFocused();
+  await page.locator(".lead-input").fill("позвонить в банк");
+
+  // Описание доступно без раскрытия — раньше пряталось за «+ описание».
+  await page.locator(".desc-input").fill("уточнить условия");
+
+  // По метке поля, а не по текущему значению: Select несёт aria-label, и он
+  // перекрывает видимый текст кнопки в доступном имени — так же, как в модалке.
+  await pickOption(page, page, "Приоритет", "Высокий");
+
+  await page.getByRole("button", { name: "Создать" }).click();
+
+  const tasks = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("__mock_db")!).tasks);
+  expect(tasks).toHaveLength(1);
+  expect(tasks[0].title).toBe("позвонить в банк");
+  expect(tasks[0].description).toBe("уточнить условия");
+  expect(tasks[0].priority).toBe("High");
+});
+
+// v0.10.18: тот же жест, что в композере главного окна, но полей здесь два.
+// Из заголовка Shift+Enter обязан ещё и перебросить каретку: заголовок — <input>,
+// он переносов строк не держит вовсе, а фокус при открытии стоит именно в нём.
+test("быстрый ввод: Shift+Enter из заголовка уводит в описание и заводит подзадачу", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
+  await withMock(page);
+  await page.goto("/quick-task.html");
+
+  await page.locator(".lead-input").fill("собрать шкаф");
+  await page.keyboard.press("Shift+Enter");
+
+  // Каретка ушла в описание — печатать можно сразу, без клика мышью.
+  await expect(page.locator(".desc-input")).toBeFocused();
+  await page.keyboard.type("разобрать коробки");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("найти отвёртку");
+
+  await page.getByRole("button", { name: "Создать" }).click();
+
+  const db = await page.evaluate(() => JSON.parse(localStorage.getItem("__mock_db")!));
+  expect(db.tasks).toHaveLength(1);
+  expect(db.tasks[0].title).toBe("собрать шкаф");
+  // Строки ☐ ушли в подзадачи, а не остались в тексте описания.
+  expect(db.tasks[0].description ?? "").not.toContain("☐");
+  expect(db.tasks[0].subtasks.map((s: any) => s.title))
+    .toEqual(["разобрать коробки", "найти отвёртку"]);
+});
+
+// Описание и подзадачи делят одно поле, поэтому разделение должно работать в обе
+// стороны: обычный текст обязан остаться описанием, а не уехать в чек-лист.
+test("быстрый ввод: обычные строки остаются описанием, ☐-строки — подзадачами", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
+  await withMock(page);
+  await page.goto("/quick-task.html");
+
+  await page.locator(".lead-input").fill("поездка");
+  await page.locator(".desc-input").click();
+  await page.keyboard.type("выехать пораньше");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("забрать билеты");
+
+  await page.getByRole("button", { name: "Создать" }).click();
+
+  const db = await page.evaluate(() => JSON.parse(localStorage.getItem("__mock_db")!));
+  expect(db.tasks[0].description).toBe("выехать пораньше");
+  expect(db.tasks[0].subtasks.map((s: any) => s.title)).toEqual(["забрать билеты"]);
+});
+
 // v0.9.25: taskStore.error выставлялся, но нигде не рендерился — упавшая
 // операция выглядела как «кнопка не работает». Теперь ошибка видна и, что
 // не менее важно, снимается после первой же успешной операции.

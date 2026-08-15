@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { emit, listen } from "@tauri-apps/api/event";
   import { api } from "../api/tauri";
   import { categoryStore } from "../stores/categories.svelte";
   import { parseClipboardNote } from "../clipboardNote";
+  import { splitSubtaskLines, SUBTASK_PREFIX } from "../composer";
   import { parseChecklist, formatChecklist } from "../checklistText";
   import ChecklistEditor from "./ChecklistEditor.svelte";
+  import Select from "./Select.svelte";
   import VoiceButton from "./VoiceButton.svelte";
   import { voice } from "../voice.svelte";
   import { applyCachedTheme, applyTheme } from "../theme";
@@ -56,7 +58,16 @@
   let description = $state("");
   let priority = $state("Medium");
   let category = $state("Other"); // the fallback category always exists
-  let showDescription = $state(false);
+
+  // $derived rather than a plain const: t() reads the current language, and a
+  // const would freeze the labels at whatever it was when the module ran. The same
+  // shape TaskModal uses for this list — values are the backend's enum spelling.
+  const priorities = $derived([
+    { value: "Low", label: t("Низкий") },
+    { value: "Medium", label: t("Средний") },
+    { value: "High", label: t("Высокий") },
+    { value: "Critical", label: t("Критический") },
+  ]);
 
   // Note
   let noteTitle = $state("");
@@ -122,7 +133,7 @@
   });
 
   function reset() {
-    title = ""; description = ""; priority = "Medium"; category = "Other"; showDescription = false;
+    title = ""; description = ""; priority = "Medium"; category = "Other";
     noteTitle = ""; noteContent = "";
     errorMsg = null;
     fromClipboard = false;
@@ -136,9 +147,20 @@
     if (!title.trim() || busy) return;
     busy = true;
     try {
-      await api.createTask({
+      // The description doubles as the subtask list: Shift+Enter inserts a line
+      // prefixed with "☐", and those lines are split off here. The same gesture as
+      // the main window's composer, so what is learned in one place holds in the
+      // other.
+      //
+      // splitSubtaskLines rather than parseComposer: the composer is a single
+      // field where the first line is the task's title, so parseComposer drops it
+      // from the description. Here the title has a field of its own and every line
+      // of this one is description — running it through parseComposer silently ate
+      // the first line.
+      const { text, subtasks } = splitSubtaskLines(description);
+      const created = await api.createTask({
         title: title.trim(),
-        description: description.trim() || null,
+        description: text.trim() || null,
         status: "Todo",
         priority: priority as any,
         category: category as any,
@@ -146,6 +168,9 @@
         tags: [],
         recurrence: "None",
       });
+      for (const sub of subtasks) {
+        await api.addSubtask(created.id, sub);
+      }
       await emit("task-created");
       await getCurrentWindow().hide();
       reset();
@@ -300,6 +325,34 @@
     }
   }
 
+  // Shift+Enter starts a subtask line in the description, the same gesture as the
+  // main window's composer.
+  //
+  // From the title it also moves the caret: the title is an <input>, which cannot
+  // hold a line break at all, so the combination would otherwise do nothing in the
+  // very field that has the focus when the window opens. Jumping to the
+  // description is what makes the gesture available from the first keystroke.
+  function insertSubtaskLine() {
+    const el = descriptionEl;
+    if (!el) return;
+    const fromTitle = document.activeElement !== el;
+    // At the end of existing text a bare prefix is enough; mid-text it needs the
+    // break first, or the subtask would be glued onto the line already there.
+    const at = fromTitle ? description.length : (el.selectionStart ?? description.length);
+    const to = fromTitle ? description.length : (el.selectionEnd ?? at);
+    const before = description.slice(0, at);
+    const needsBreak = before !== "" && !before.endsWith("\n");
+    const insert = (needsBreak ? "\n" : "") + SUBTASK_PREFIX;
+    description = before + insert + description.slice(to);
+    const caret = at + insert.length;
+    // After the DOM has the new value: setting it first would leave the caret at
+    // the end of the field on the next keystroke.
+    tick().then(() => {
+      el.focus();
+      el.setSelectionRange(caret, caret);
+    });
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.ctrlKey && e.shiftKey && e.code === "KeyD") {
       e.preventDefault();
@@ -315,6 +368,14 @@
       return;
     }
     if (e.key === "Escape") { cancel(); return; }
+    // Shift+Enter starts a subtask line — creation of a task only. A note has no
+    // subtasks, and in the pinned slot the checklist is a field of its own with its
+    // own editor, so the combination belongs to that editor there.
+    if (e.key === "Enter" && e.shiftKey && mode === "task") {
+      e.preventDefault();
+      insertSubtaskLine();
+      return;
+    }
     // Enter creates: for a task from any field, for a note only with Ctrl (a plain
     // Enter in a textarea inserts a line break). Editing a pinned item behaves like a
     // note: it is multi-line text as well.
@@ -355,12 +416,20 @@
 
 <div class="container">
   {#if mode !== "pinned"}
+    <!-- Tabs as plain text rather than a .seg control. The window has exactly one
+         job, and a bordered segmented control at the top competed with the field
+         below it for first attention — everything weighed the same and the eye had
+         nowhere to land. Underlined text still reads as a choice while staying
+         quieter than the input it introduces.
+
+         This is deliberately NOT the shared .seg: that control exists to make a
+         toggle read as one object among many on a busy screen, and here there is
+         nothing to be one of. The exception is written down so a later pass does
+         not "unify" it back — the same note .seg--underline carries in app.css. -->
     <div class="tabs">
-      <div class="seg">
-        <button class:active={mode === "task"} onclick={() => mode = "task"}>{t("Задача")}</button>
-        <button class:active={mode === "note"} onclick={() => mode = "note"}>{t("Заметка")}</button>
-      </div>
-      <span style="flex:1;"></span>
+      <button class="tab" class:active={mode === "task"} onclick={() => mode = "task"}>{t("Задача")}</button>
+      <button class="tab" class:active={mode === "note"} onclick={() => mode = "note"}>{t("Заметка")}</button>
+      <span class="tabs-spacer"></span>
       <kbd>Ctrl Tab</kbd>
     </div>
   {/if}
@@ -425,37 +494,48 @@
       </div>
     {/if}
   {:else if mode === "task"}
+    <!-- The title carries the window. It is borderless and larger than anything
+         else here so the window reads as "type here" at a glance instead of as a
+         form to be filled in top to bottom. -->
     <!-- svelte-ignore a11y_autofocus -->
-    <input bind:value={title} placeholder={t("Название задачи...")} autofocus />
+    <input class="lead-input" bind:value={title} placeholder={t("Название задачи...")} autofocus />
 
-    <div class="row">
-      <select bind:value={priority}>
-        <option value="Low">{t("Низкий")}</option>
-        <option value="Medium">{t("Средний")}</option>
-        <option value="High">{t("Высокий")}</option>
-        <option value="Critical">{t("Критический")}</option>
-      </select>
-      <select bind:value={category}>
-        {#each categoryStore.categories as c (c.id)}
-          <option value={c.id}>{categoryStore.name(c.id)}</option>
-        {/each}
-      </select>
-      <button class="desc-toggle" onclick={() => showDescription = !showDescription}>
-        {showDescription ? "−" : t("+ описание")}
-      </button>
+    <!-- The description is always present rather than behind a "+ описание"
+         toggle. The toggle cost a click and a re-layout to reveal a field that was
+         going to be typed into anyway, and it sat in the same row as the two
+         selects, which is what made that row read as three unrelated controls
+         crammed together. Kept visually quiet so it does not compete with the
+         title above it. -->
+    <div class="field-with-voice desc-field">
+      <!-- The placeholder is where this gesture is discoverable: nothing else on
+           the screen hints that Shift+Enter does anything. Same wording as the
+           main window's composer, which carries the same hint. -->
+      <textarea class="desc-input" bind:this={descriptionEl} bind:value={description}
+        placeholder={t("Описание... (Shift+Enter — подзадача)")}></textarea>
+      <VoiceButton onText={(text) => {
+        if (!descriptionEl) return;
+        description = insertIntoTextarea(descriptionEl, description, text);
+      }} />
     </div>
 
-    {#if showDescription}
-      <div class="field-with-voice">
-        <textarea bind:this={descriptionEl} bind:value={description} placeholder={t("Описание...")} rows="2"></textarea>
-        <VoiceButton onText={(text) => {
-          if (!descriptionEl) return;
-          description = insertIntoTextarea(descriptionEl, description, text);
-        }} />
+    <!-- The footer holds what qualifies the task rather than what the task is:
+         parameters on the left, the commit on the right. Separating them by role
+         is what lets the eye skip the row entirely when the defaults are fine. -->
+    <div class="footer">
+      <div class="params">
+        <Select
+          value={priority}
+          options={priorities}
+          onChange={(v) => priority = v}
+          ariaLabel={t("Приоритет")}
+        />
+        <Select
+          value={category}
+          options={categoryStore.categories.map((c) => ({ value: c.id, label: categoryStore.name(c.id) }))}
+          onChange={(v) => category = v}
+          ariaLabel={t("Категория")}
+        />
       </div>
-    {/if}
-
-    <div class="buttons">
       <button class="btn-ghost" onclick={cancel}>{t("Отмена")}</button>
       <button class="btn-primary" onclick={createTask} disabled={!title.trim()}>{t("Создать")}</button>
     </div>
@@ -464,10 +544,11 @@
       <p class="clip-hint">{t("Текст из буфера обмена — можно поправить перед сохранением")}</p>
     {/if}
     <!-- svelte-ignore a11y_autofocus -->
-    <input bind:value={noteTitle} placeholder={t("Заголовок заметки...")} autofocus
+    <input class="lead-input" bind:value={noteTitle} placeholder={t("Заголовок заметки...")} autofocus
       oninput={() => fromClipboard = false} />
-    <div class="field-with-voice">
-      <textarea bind:this={noteContentEl} bind:value={noteContent} placeholder={t("Текст заметки... (Ctrl+Enter — сохранить)")} rows="3"
+    <div class="field-with-voice desc-field">
+      <textarea class="desc-input" bind:this={noteContentEl} bind:value={noteContent}
+        placeholder={t("Текст заметки... (Ctrl+Enter — сохранить)")}
         oninput={() => fromClipboard = false}></textarea>
       <VoiceButton onText={(text) => {
         if (!noteContentEl) return;
@@ -476,7 +557,10 @@
       }} />
     </div>
 
-    <div class="buttons">
+    <!-- No .params here: a note has nothing to qualify. The footer keeps its shape
+         so the commit button does not jump between the two tabs. -->
+    <div class="footer">
+      <span class="tabs-spacer"></span>
       <button class="btn-ghost" onclick={cancel}>{t("Отмена")}</button>
       <button class="btn-primary" onclick={createNote} disabled={!noteTitle.trim() && !noteContent.trim()}>{t("Создать")}</button>
     </div>
@@ -485,18 +569,54 @@
 
 <style>
   .container {
-    padding: 12px 14px;
+    padding: 14px 16px 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
     background: var(--bg-primary);
     height: 100vh;
     box-sizing: border-box;
   }
+  /* No blanket gap. Every group used to be 8px from every other, so the tabs, the
+     title, the selects and the buttons all read as one undifferentiated stack —
+     which is what made a window with four controls feel cramped. Spacing is set
+     per boundary instead, by how related the two sides are. */
   .tabs {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 14px;
+    margin-bottom: 10px;
+  }
+  .tabs-spacer {
+    flex: 1;
+  }
+  /* Text, not a segmented control: see the markup. The underline is the same
+     gradient the active tab carries in the main window, so "this one is current"
+     looks the same in both places. */
+  .tab {
+    padding: 2px 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    position: relative;
+  }
+  .tab:hover {
+    background: transparent;
+    color: var(--text-primary);
+  }
+  .tab.active {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+  .tab.active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -3px;
+    height: 2px;
+    border-radius: 1px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
   }
   .error {
     font-size: 12px;
@@ -508,16 +628,48 @@
     color: var(--text-secondary);
     margin: 0;
   }
-  .row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
+  /* The one field the window is about. Borderless and larger than the body text:
+     a boxed input the same size as everything else made the window read as a form,
+     and the first thing to do here is type. The focus ring is dropped with it —
+     the caret already sits in this field on open, and a ring around the only lead
+     element is noise. */
+  .lead-input {
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-size: 17px;
+    font-weight: 500;
+    line-height: 1.3;
   }
-  .row select { flex: 1; }
-  .desc-toggle {
-    white-space: nowrap;
-    font-size: 12px;
-    padding: 4px 8px;
+  .lead-input:focus {
+    outline: none;
+    border-color: transparent;
+  }
+  .lead-input::placeholder {
+    color: var(--text-secondary);
+    font-weight: 400;
+  }
+  /* The secondary field fills whatever is left between the title and the footer,
+     so the window has no dead space at the bottom regardless of its height. */
+  .desc-field {
+    flex: 1;
+    min-height: 0;
+    margin-top: 10px;
+  }
+  .desc-input {
+    flex: 1;
+    min-height: 0;
+    border: none;
+    background: transparent;
+    padding: 0;
+    resize: none;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .desc-input:focus {
+    outline: none;
+    border-color: transparent;
+    color: var(--text-primary);
   }
   textarea {
     resize: none;
@@ -548,6 +700,34 @@
     gap: 8px;
     justify-content: flex-end;
     margin-top: 2px;
+  }
+  /* The footer is a band rather than a row of buttons: it spans the full width by
+     cancelling the container's side padding, and its own background separates
+     "what the thing is" above from "how it is filed" below. The negative margin is
+     what lets the band touch the window edges while the fields stay inset. */
+  .footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px -16px 0;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+  .params {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    /* The two dropdowns share the room left of the buttons instead of sizing to
+       their labels: a category named "Другое" against one named "Саморазвитие"
+       made the pair visibly lopsided. */
+    min-width: 0;
+  }
+  .params :global(button) {
+    font-size: 12px;
+    padding: 3px 8px;
+    max-width: 100%;
   }
   /* Editing the pinned item. A creation form is a "blank sheet"; here, by
      contrast, it matters to see at a glance that something existing is being

@@ -1,5 +1,32 @@
 import { describe, it, expect } from "vitest";
-import { parseComposer, parseTaskText, matchCategoryQuery } from "./composer";
+import { parseComposer, parseTaskText, matchCategoryQuery, splitSubtaskLines } from "./composer";
+
+// Quick capture splits off the "☐" lines too, but its title lives in a field of
+// its own, so the first line of the description field is already description.
+// parseComposer ate it silently there: the task was saved with description = null
+// and the text simply vanished.
+describe("splitSubtaskLines", () => {
+  it("первая строка остаётся текстом, а не уходит в заголовок", () => {
+    expect(splitSubtaskLines("выехать пораньше\n☐ забрать билеты")).toEqual({
+      text: "выехать пораньше",
+      subtasks: ["забрать билеты"],
+    });
+  });
+
+  it("текст без ☐ возвращается целиком", () => {
+    expect(splitSubtaskLines("первая\nвторая")).toEqual({
+      text: "первая\nвторая",
+      subtasks: [],
+    });
+  });
+
+  it("пустые ☐-строки отбрасываются", () => {
+    expect(splitSubtaskLines("☐ \n☐ реальная")).toEqual({
+      text: "",
+      subtasks: ["реальная"],
+    });
+  });
+});
 
 describe("parseComposer", () => {
   it("одна строка — только название", () => {

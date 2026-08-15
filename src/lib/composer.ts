@@ -12,7 +12,13 @@ export interface ComposerDraft {
   subtasks: string[];
 }
 
-export function parseComposer(src: string): ComposerDraft {
+/// Splits "☐" lines off from ordinary text, without deciding what the text means.
+///
+/// The quick-capture window needs exactly this and nothing more: it has a title
+/// field of its own, so every line of its description field is description. Going
+/// through parseComposer there would silently eat the first line, which is the
+/// title only when one field holds both.
+export function splitSubtaskLines(src: string): { text: string; subtasks: string[] } {
   const subtasks: string[] = [];
   const textLines: string[] = [];
 
@@ -25,6 +31,15 @@ export function parseComposer(src: string): ComposerDraft {
     }
   }
 
+  return { text: textLines.join("\n"), subtasks };
+}
+
+export function parseComposer(src: string): ComposerDraft {
+  const { text, subtasks } = splitSubtaskLines(src);
+  const textLines = text.split("\n");
+
+  // The composer is one field for everything, so its first ordinary line is the
+  // title and the rest is the description.
   while (textLines.length > 0 && !textLines[0].trim()) textLines.shift();
   const title = (textLines.shift() ?? "").trim();
   const description = textLines.join("\n").trim();

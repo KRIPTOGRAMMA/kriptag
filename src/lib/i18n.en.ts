@@ -373,7 +373,7 @@ export const EN: Record<string, string> = {
 
   // --- Quick capture ---
   "Заголовок...": "Title...",
-  "Описание...": "Description...",
+  "Описание... (Shift+Enter — подзадача)": "Description... (Shift+Enter for a subtask)",
   "Текст заметки... (Ctrl+Enter — сохранить)": "Note text... (Ctrl+Enter to save)",
   "Текст... (Ctrl+Enter — сохранить)": "Text... (Ctrl+Enter to save)",
   "Сохранено": "Saved",
