@@ -2308,6 +2308,68 @@ test("командная палитра: клавиатурная навигац
   await expect(page.getByRole("heading", { name: "Дашборд" })).toBeVisible();
 });
 
+// v0.10.20: ИИ-чат по заметкам. Ретривал — тот же search_notes, что и у поиска,
+// поэтому чат наследует всё, что поиск умеет (в т.ч. стемминг v0.10.19).
+test("спросить заметки: кнопка в Заметках открывает окно и отвечает по найденному", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [],
+    notes: [
+      { title: "Поездка", content: "выехать в субботу, забрать билеты" },
+      { title: "Рецепт", content: "тесто и начинка" },
+    ],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  // Набранное в фильтре списка переезжает в окно как вопрос: если человек искал
+  // и не нашёл, спрашивать он будет ровно про это.
+  await page.getByPlaceholder("Поиск...").fill("билеты");
+  await page.getByRole("button", { name: "Спросить заметки" }).click();
+
+  await expect(page.locator(".ask-input")).toHaveValue("билеты");
+  await expect(page.locator(".ask-answer")).toContainText("Поездка");
+
+  // Источники показаны всегда: ответ, который нельзя проследить до заметок,
+  // приходится принимать на веру.
+  await expect(page.locator(".ask-source", { hasText: "Поездка" })).toBeVisible();
+  await expect(page.locator(".ask-source", { hasText: "Рецепт" })).toHaveCount(0);
+});
+
+test("спросить заметки: источник открывает заметку", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [],
+    notes: [{ title: "Поездка", content: "выехать в субботу, забрать билеты" }],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.getByPlaceholder("Поиск...").fill("билеты");
+  await page.getByRole("button", { name: "Спросить заметки" }).click();
+  await page.locator(".ask-source", { hasText: "Поездка" }).click();
+  // Тот же requestFocus, что и у результата поиска: заметка открывается в
+  // редакторе, а не просто подсвечивается в списке.
+  await expect(page.getByPlaceholder("Название", { exact: true })).toHaveValue("Поездка");
+});
+
+test("спросить заметки: когда ничего не нашлось — так и сказано, без выдуманного ответа", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [],
+    notes: [{ title: "Поездка", content: "выехать в субботу" }],
+  });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.getByPlaceholder("Поиск...").fill("квантовая хромодинамика");
+  await page.getByRole("button", { name: "Спросить заметки" }).click();
+
+  await expect(page.locator(".ask-answer")).toContainText("ничего не нашлось");
+  // Источников нет — значит и опереться ответу было не на что.
+  await expect(page.locator(".ask-source")).toHaveCount(0);
+});
+
 test("командная палитра: «Спланировать день» переходит в календарь-неделю", async ({ page }) => {
   await withMock(page);
   await page.goto("/");

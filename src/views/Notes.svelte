@@ -13,6 +13,7 @@
   import Icon from "../lib/components/Icon.svelte";
   import VoiceButton from "../lib/components/VoiceButton.svelte";
   import Select from "../lib/components/Select.svelte";
+  import AskNotes from "../lib/components/AskNotes.svelte";
   import ContextMenu, { type MenuItem } from "../lib/components/ContextMenu.svelte";
   import type { Note, NoteRevision } from "../lib/types";
   import { localDateKey, toLocalInput, localeTag } from "../lib/datetime";
@@ -38,6 +39,7 @@
   let zenMode = $state(false);
   // The list and the Trash are mutually exclusive, like the segmented toggle in Tasks.
   let listSubView: "notes" | "trash" = $state("notes");
+  let showAsk = $state(false);
 
   const selected = $derived(noteStore.notes.find(n => n.id === selectedId) ?? null);
   const otherTitles = $derived(noteStore.notes.filter(n => n.id !== selectedId).map(n => n.title));
@@ -236,12 +238,21 @@
     if (created) selectNote(created);
   }
 
-  // Opening a note on a signal from global search (Ctrl+K).
+  // Opening a note on a signal from global search (Ctrl+K) or from the answer's
+  // sources in "Ask my notes".
+  //
+  // The signal is cleared only once the note has actually been found. Clearing it
+  // unconditionally lost the request whenever this section had just mounted and
+  // noteStore.notes was still empty — the effect ran, found nothing, and threw the
+  // id away before the list arrived. Ctrl+K mostly hid the bug because the user
+  // was usually already in Notes; asking from another section hits it every time.
+  // Keeping the id lets the effect re-run when the list loads.
   $effect(() => {
     const id = noteStore.focusNoteId;
     if (!id) return;
     const note = noteStore.notes.find(n => n.id === id);
-    if (note) selectNote(note);
+    if (!note) return;
+    selectNote(note);
     noteStore.clearFocus();
   });
 
@@ -849,6 +860,13 @@ ${bodyHtml}
     <div class="list-head">
       <button class="btn-primary btn-sm" style="width:100%;" onclick={newNote}>{t("+ Новая заметка")}</button>
       <button class="btn-ghost btn-sm" style="width:100%;" onclick={openDailyNote}><Icon name="calendar" size={12} /> {t("Сегодня")}</button>
+      <!-- Asking lives here rather than only behind Ctrl+K: the question "where
+           did I write about..." belongs to the section the notes are in, and a
+           palette-only entry is invisible to anyone who does not already know
+           the command exists. -->
+      <button class="btn-ghost btn-sm" style="width:100%;" onclick={() => showAsk = true}>
+        <Icon name="sparkles" size={12} /> {t("Спросить заметки")}
+      </button>
       <div class="seg seg-list">
         <button class:active={listSubView === "notes"} onclick={() => listSubView = "notes"}>{t("Заметки")}</button>
         <button class:active={listSubView === "trash"} onclick={() => { listSubView = "trash"; noteStore.loadDeleted(); }}>{t("Корзина")}</button>
@@ -1281,6 +1299,16 @@ ${bodyHtml}
       {/if}
     </div>
   </div>
+{/if}
+
+{#if showAsk}
+  <!-- The list filter carries over as the question: if the user typed something
+       there and did not find it, that text is exactly what they want to ask. -->
+  <AskNotes
+    initialQuestion={noteFilter}
+    onClose={() => showAsk = false}
+    onSelectNote={(id) => { noteStore.requestFocus(id); showAsk = false; }}
+  />
 {/if}
 
 <style>

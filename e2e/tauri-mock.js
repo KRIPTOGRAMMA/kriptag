@@ -69,6 +69,12 @@
   }
   if (!db) db = { tasks: [], notes: [], projects: [], settings: { ...defaultSettings } };
   if (!db.projects) db.projects = [];
+  // Как и projects строкой выше: сид задаёт только те разделы, которые ему
+  // нужны, и db.notes может не быть вовсе. Без этой строки нормализация ниже
+  // падала на undefined и обрывала инициализацию мока целиком — экран
+  // оставался пустым, а падал при этом посторонний тест про язык.
+  if (!db.notes) db.notes = [];
+  if (!db.tasks) db.tasks = [];
   for (const p of db.projects) {
     p.goal_period ??= "week";
     p.goal_tasks ??= null;
@@ -76,6 +82,16 @@
   }
   // Ручной порядок: сид мог не проставить sort_order
   db.tasks.forEach((t, i) => { t.sort_order ??= i + 1; });
+  // Идентификаторы заметок: сид пишет только title/content, а настоящий бэкенд
+  // выдаёт id при вставке. Без этого всё, что адресует заметку ПО id, молча
+  // работает с undefined — так и всплыло в v0.10.20 (клик по источнику ответа
+  // переключал раздел, но заметку не открывал: find по undefined не находит).
+  db.notes.forEach((n) => {
+    n.id ??= uuid();
+    n.tags ??= [];
+    n.created_at ??= now();
+    n.updated_at ??= now();
+  });
   // Категории задач: зеркало посева миграции 0015
   if (!db.categories) {
     db.categories = [
@@ -783,6 +799,25 @@
       setTimeout(() => window.__mockEmit("ai-extract-tasks", {
         request_id: requestId,
         items: ["Купить билеты", "Забронировать отель"],
+        error: null,
+      }), 0);
+    },
+    // Спросить заметки (v0.10.20). Мок повторяет ГЛАВНОЕ свойство бэкенда:
+    // ретривал идёт через тот же поиск, и когда он пуст — ответ «не нашлось»
+    // отдаётся без обращения к модели. Именно это защищает от выдуманного
+    // ответа, поэтому именно это и должен проверять e2e.
+    ai_ask_notes: ({ requestId, question }) => {
+      const q = (question ?? "").trim().toLowerCase();
+      const found = db.notes
+        .filter((n) => !n.deleted_at)
+        .filter((n) => n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q))
+        .slice(0, 5);
+      setTimeout(() => window.__mockEmit("ai-ask-notes", {
+        request_id: requestId,
+        result: found.length
+          ? `Ответ по заметкам: ${found.map((n) => n.title).join(", ")}`
+          : "В заметках ничего не нашлось по этому вопросу. Поиск идёт по словам, поэтому попробуйте другую формулировку.",
+        sources: found.map((n) => ({ id: n.id, title: n.title })),
         error: null,
       }), 0);
     },

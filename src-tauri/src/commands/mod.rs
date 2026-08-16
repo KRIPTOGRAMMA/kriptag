@@ -22,3 +22,4 @@ pub mod statuses;
 pub mod pinned;
 pub mod hotkeys;
 pub mod voice;
+pub mod rag;

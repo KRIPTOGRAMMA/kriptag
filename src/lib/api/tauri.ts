@@ -58,6 +58,7 @@ export const api = {
     invoke<void>("ai_edit_selection", { requestId, text, mode }),
   aiSummarizeNote: (requestId: string, text: string) => invoke<void>("ai_summarize_note", { requestId, text }),
   aiExtractTasks: (requestId: string, text: string) => invoke<void>("ai_extract_tasks", { requestId, text }),
+  aiAskNotes: (requestId: string, question: string) => invoke<void>("ai_ask_notes", { requestId, question }),
   getNoteRevisions: (noteId: string) => invoke<NoteRevision[]>("get_note_revisions", { noteId }),
   getNoteRevisionContent: (revisionId: string) => invoke<string>("get_note_revision_content", { revisionId }),
   restoreNoteRevision: (revisionId: string) => invoke<Note>("restore_note_revision", { revisionId }),

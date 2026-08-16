@@ -384,6 +384,7 @@ pub fn run() {
                         commands::ai::ai_edit_selection,
                         commands::ai::ai_summarize_note,
                         commands::ai::ai_extract_tasks,
+                        commands::rag::ai_ask_notes,
                         commands::planner::ai_plan_day,
                         commands::planner::ai_what_now,
                         commands::notes::get_notes,
