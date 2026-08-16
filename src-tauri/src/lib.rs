@@ -8,6 +8,7 @@ mod ai;
 mod voice;
 mod status;
 mod i18n;
+mod stem;
 mod mock_guard;
 mod palette_guard;
 

@@ -4,6 +4,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::error::{AppError, AppResult};
+use crate::stem::stem_text;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Note {
@@ -456,9 +457,74 @@ pub async fn rename_note_links_impl(pool: &SqlitePool, old_title: String, new_ti
     Ok(updated)
 }
 
+/// Brings notes_stem_fts up to date with whatever the triggers marked dirty.
+///
+/// Called at the start of every search rather than after every write. Stemming
+/// on write would pay the cost on the wiki-link rename, which rewrites many
+/// notes in one go; doing it here means the work happens once, when the result
+/// is actually about to be read, and a burst of edits collapses into a single
+/// pass.
+///
+/// The trigger is what makes this safe. The note text is written from five
+/// different places in this file, and a sixth added later would silently drop
+/// out of the stemmed index if each write path had to remember to sync. Marking
+/// is done by the database, so no write path can slip past it.
+pub async fn reindex_stemmed_notes(pool: &SqlitePool) -> AppResult<u64> {
+    let dirty = sqlx::query(
+        "SELECT n.rowid AS rid, n.title, n.content, n.tags
+         FROM notes_stem_dirty d
+         INNER JOIN notes n ON n.rowid = d.rowid_ref"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut done = 0u64;
+    for row in &dirty {
+        let rid: i64 = row.get("rid");
+        let title: String = row.get("title");
+        let content: String = row.get("content");
+        let tags: String = row.get("tags");
+
+        // Delete first: FTS5 has no upsert, and re-inserting the same rowid
+        // without this leaves the previous version in the index, so an edited
+        // note would keep matching the words it no longer contains.
+        sqlx::query("DELETE FROM notes_stem_fts WHERE rowid = ?")
+            .bind(rid)
+            .execute(pool)
+            .await?;
+
+        sqlx::query("INSERT INTO notes_stem_fts(rowid, title, content, tags) VALUES (?, ?, ?, ?)")
+            .bind(rid)
+            .bind(stem_text(&title))
+            .bind(stem_text(&content))
+            .bind(stem_text(&tags))
+            .execute(pool)
+            .await?;
+
+        done += 1;
+    }
+
+    // Clearing after the loop, not inside it: if stemming fails halfway the rows
+    // stay dirty and the next search retries them. Losing the mark would leave
+    // the note permanently unindexed with nothing to show for it.
+    if done > 0 {
+        sqlx::query("DELETE FROM notes_stem_dirty").execute(pool).await?;
+    }
+
+    Ok(done)
+}
+
 #[tauri::command]
 pub async fn search_notes(pool: State<'_, SqlitePool>, query: String) -> AppResult<Vec<Note>> {
     search_notes_impl(pool.inner(), query).await
+}
+
+/// Wraps raw user input as an FTS5 phrase prefix.
+///
+/// As in search_tasks: what the user types is not FTS5 syntax, so it is quoted
+/// as a phrase and any quotes inside are doubled.
+fn fts_phrase(text: &str) -> String {
+    format!("\"{}\"*", text.replace('"', "\"\""))
 }
 
 pub async fn search_notes_impl(pool: &SqlitePool, query: String) -> AppResult<Vec<Note>> {
@@ -467,10 +533,7 @@ pub async fn search_notes_impl(pool: &SqlitePool, query: String) -> AppResult<Ve
         return Ok(vec![]);
     }
 
-    // As in search_tasks: raw input is not FTS5 syntax, so we wrap it as a quoted
-    // phrase prefix and double any quotes.
-    let escaped = trimmed.replace('"', "\"\"");
-    let fts_query = format!("\"{}\"*", escaped);
+    reindex_stemmed_notes(pool).await?;
 
     let rows = sqlx::query(
         "SELECT n.id, n.title, n.content, n.tags, n.linked_task_id, n.project_id, n.pinned, n.created_at, n.updated_at, n.reminder_at
@@ -480,11 +543,38 @@ pub async fn search_notes_impl(pool: &SqlitePool, query: String) -> AppResult<Ve
            AND n.deleted_at IS NULL
          ORDER BY rank"
     )
-    .bind(fts_query)
+    .bind(fts_phrase(trimmed))
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(row_to_note).collect())
+    let mut notes: Vec<Note> = rows.into_iter().map(row_to_note).collect();
+
+    // The stemmed half comes second and appends only what the exact half missed,
+    // so an exact hit is never pushed below an approximate one. Both are one
+    // list to the user — there is no "similar" section to reason about, search
+    // simply finds more than it did.
+    let seen: std::collections::HashSet<String> = notes.iter().map(|n| n.id.clone()).collect();
+
+    let stem_rows = sqlx::query(
+        "SELECT n.id, n.title, n.content, n.tags, n.linked_task_id, n.project_id, n.pinned, n.created_at, n.updated_at, n.reminder_at
+         FROM notes n
+         INNER JOIN notes_stem_fts ON notes_stem_fts.rowid = n.rowid
+         WHERE notes_stem_fts MATCH ?
+           AND n.deleted_at IS NULL
+         ORDER BY rank"
+    )
+    .bind(fts_phrase(&stem_text(trimmed)))
+    .fetch_all(pool)
+    .await?;
+
+    for row in stem_rows {
+        let note = row_to_note(row);
+        if !seen.contains(&note.id) {
+            notes.push(note);
+        }
+    }
+
+    Ok(notes)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -504,8 +594,7 @@ pub async fn search_notes_snippet_impl(pool: &SqlitePool, query: String) -> AppR
         return Ok(vec![]);
     }
 
-    let escaped = trimmed.replace('"', "\"\"");
-    let fts_query = format!("\"{}\"*", escaped);
+    reindex_stemmed_notes(pool).await?;
 
     let rows = sqlx::query(
         "SELECT n.id, n.title, n.content, n.tags, n.linked_task_id, n.project_id, n.pinned, n.created_at, n.updated_at, n.reminder_at,
@@ -516,14 +605,60 @@ pub async fn search_notes_snippet_impl(pool: &SqlitePool, query: String) -> AppR
            AND n.deleted_at IS NULL
          ORDER BY rank"
     )
-    .bind(fts_query)
+    .bind(fts_phrase(trimmed))
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| {
+    let mut out: Vec<NoteSnippet> = rows.into_iter().map(|r| {
         let snippet: Option<String> = r.get("snippet");
         NoteSnippet { item: row_to_note(r), snippet: snippet.unwrap_or_default() }
-    }).collect())
+    }).collect();
+
+    let seen: std::collections::HashSet<String> = out.iter().map(|s| s.item.id.clone()).collect();
+
+    // No snippet() on notes_stem_fts: it stores stems, so it would highlight
+    // "покупк" instead of the word the note actually contains. The stemmed half
+    // only answers "does this note match" — the excerpt is built from the note's
+    // own text below.
+    let stem_rows = sqlx::query(
+        "SELECT n.id, n.title, n.content, n.tags, n.linked_task_id, n.project_id, n.pinned, n.created_at, n.updated_at, n.reminder_at
+         FROM notes n
+         INNER JOIN notes_stem_fts ON notes_stem_fts.rowid = n.rowid
+         WHERE notes_stem_fts MATCH ?
+           AND n.deleted_at IS NULL
+         ORDER BY rank"
+    )
+    .bind(fts_phrase(&stem_text(trimmed)))
+    .fetch_all(pool)
+    .await?;
+
+    for row in stem_rows {
+        let note = row_to_note(row);
+        if seen.contains(&note.id) {
+            continue;
+        }
+        let snippet = lead_excerpt(&note.content);
+        out.push(NoteSnippet { item: note, snippet });
+    }
+
+    Ok(out)
+}
+
+/// The opening of a note, for results that matched only on a stem.
+///
+/// Deliberately unmarked: the matching word is in some other form than the one
+/// typed, so there is nothing in the text to put <mark> around without
+/// re-deriving the position from the stems. Showing the start of the note is
+/// honest and tells the user what it is about; a wrongly placed highlight would
+/// not.
+fn lead_excerpt(content: &str) -> String {
+    const LIMIT: usize = 120;
+    let flat = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= LIMIT {
+        return flat;
+    }
+    let cut: String = flat.chars().take(LIMIT).collect();
+    format!("{cut}…")
 }
 
 #[tauri::command]
@@ -1408,5 +1543,230 @@ mod tests {
         let trash = get_deleted_notes_impl(&pool).await.unwrap();
         assert_eq!(trash.len(), 1);
         assert_eq!(trash[0].id, trashed.id);
+    }
+
+    // --- Stemmed search (v0.10.19) ---
+
+    #[tokio::test]
+    async fn a_query_in_another_word_form_finds_the_note() {
+        let pool = test_pool().await;
+        create_note_impl(&pool, CreateNote {
+            title: "хозяйство".into(),
+            content: "сходить за покупками в субботу".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        // Plain FTS5 does not stem: "покупки" and "покупками" are different
+        // tokens, and the trailing prefix star does not bridge them either.
+        let found = search_notes_impl(&pool, "покупки".into()).await.unwrap();
+        assert_eq!(found.len(), 1, "форма слова не нашлась — стемминг не работает");
+        assert_eq!(found[0].title, "хозяйство");
+    }
+
+    #[tokio::test]
+    async fn an_exact_match_outranks_a_stemmed_one() {
+        let pool = test_pool().await;
+        create_note_impl(&pool, CreateNote {
+            title: "по форме".into(),
+            content: "сходить за покупками".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+        create_note_impl(&pool, CreateNote {
+            title: "точное".into(),
+            content: "мои покупки за месяц".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        let found = search_notes_impl(&pool, "покупки".into()).await.unwrap();
+        assert_eq!(found.len(), 2, "нашлись не обе заметки");
+        assert_eq!(
+            found[0].title, "точное",
+            "точное совпадение ушло ниже стеммированного — верх выдачи размывается"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_is_never_returned_twice() {
+        let pool = test_pool().await;
+        create_note_impl(&pool, CreateNote {
+            title: "одна".into(),
+            content: "покупки и ещё раз покупки".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        // The word matches exactly AND survives stemming, so the note is in both
+        // indexes at once — the merge has to drop the duplicate.
+        let found = search_notes_impl(&pool, "покупки".into()).await.unwrap();
+        assert_eq!(found.len(), 1, "заметка попала в выдачу дважды: {found:?}");
+    }
+
+    #[tokio::test]
+    async fn every_write_path_reaches_the_stemmed_index() {
+        // The guard for the one thing that cannot be guaranteed by construction.
+        // Notes are written from five places in this file; each is exercised here
+        // and afterwards every note has to be findable by its CURRENT text.
+        //
+        // Comparing row counts instead was the first version of this test, and it
+        // was worthless: dropping the UPDATE trigger left the counts equal — the
+        // row is created and counted, it just holds stale text.
+        //
+        // Searching once at the end was the second version, and it was worthless
+        // for a subtler reason: the INSERT mark survives until the first search,
+        // so a reindex that runs only after every edit reads the current text
+        // anyway and the missing UPDATE trigger stays invisible. The index has to
+        // be BUILT first, and only then edited — that is when a lost mark shows.
+        // Both failures found by breaking the trigger, not by reasoning.
+        let pool = test_pool().await;
+
+        let a = create_note_impl(&pool, CreateNote {
+            title: "первая".into(),
+            content: "исходный текст".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        // Builds the index and consumes the INSERT marks.
+        assert_eq!(
+            search_notes_impl(&pool, "исходный".into()).await.unwrap().len(), 1,
+            "заметка не нашлась до правок — индекс не построился"
+        );
+
+        update_note_impl(&pool, a.id.clone(), UpdateNote {
+            title: Some("переименованная".into()),
+            content: Some("совсем другие покупками слова".into()),
+            tags: Some(vec!["метка".into()]),
+            linked_task_id: None,
+            project_id: None,
+            pinned: None,
+            reminder_at: None,
+        }).await.unwrap();
+
+        create_note_impl(&pool, CreateNote {
+            title: "вторая".into(),
+            content: "ссылка [[переименованная]] внутри".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        // Same again for the mass rewrite: index it, then rewrite it.
+        assert_eq!(
+            search_notes_impl(&pool, "ссылка".into()).await.unwrap().len(), 1,
+            "вторая заметка не нашлась до переименования"
+        );
+        rename_note_links_impl(&pool, "переименованная".into(), "новое имя".into())
+            .await.unwrap();
+
+        reindex_stemmed_notes(&pool).await.unwrap();
+
+        // Every note, by a distinctive word of the text it holds RIGHT NOW. Each
+        // of these arrived through a different write path, and a path that did
+        // not reach the index leaves its note unfindable here.
+        for (word, expect_title) in [
+            ("покупки", "переименованная"),   // update_note_impl (content)
+            ("переименованная", "переименованная"), // update_note_impl (title)
+            ("новое", "вторая"),              // rename_note_links_impl (mass rewrite)
+        ] {
+            let found = search_notes_impl(&pool, word.into()).await.unwrap();
+            assert!(
+                found.iter().any(|n| n.title == expect_title),
+                "«{word}» не нашло заметку «{expect_title}» — путь записи прошёл мимо индекса; нашлось: {:?}",
+                found.iter().map(|n| &n.title).collect::<Vec<_>>()
+            );
+        }
+
+        // And nothing is findable by text that was replaced.
+        assert!(
+            search_notes_impl(&pool, "исходный".into()).await.unwrap().is_empty(),
+            "заметка находится по затёртому тексту — старая версия осталась в индексе"
+        );
+
+        let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM notes_stem_dirty")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(dirty, 0, "после переиндексации остались помеченные строки");
+    }
+
+    #[tokio::test]
+    async fn an_edited_note_stops_matching_its_old_words() {
+        let pool = test_pool().await;
+        let note = create_note_impl(&pool, CreateNote {
+            title: "заметка".into(),
+            content: "про покупками".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+        assert_eq!(search_notes_impl(&pool, "покупки".into()).await.unwrap().len(), 1);
+
+        update_note_impl(&pool, note.id.clone(), UpdateNote {
+            title: None,
+            content: Some("теперь про созвоны".into()),
+            tags: None,
+            linked_task_id: None,
+            project_id: None,
+            pinned: None,
+            reminder_at: None,
+        }).await.unwrap();
+
+        // FTS5 has no upsert: without deleting the old row first, the note would
+        // keep matching words it no longer contains.
+        assert!(
+            search_notes_impl(&pool, "покупки".into()).await.unwrap().is_empty(),
+            "заметка находится по слову, которого в ней больше нет"
+        );
+        assert_eq!(search_notes_impl(&pool, "созвон".into()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_trashed_note_stays_out_of_the_stemmed_half_too() {
+        let pool = test_pool().await;
+        let note = create_note_impl(&pool, CreateNote {
+            title: "выброшенная".into(),
+            content: "сходить за покупками".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        delete_note_impl(&pool, note.id).await.unwrap();
+
+        assert!(
+            search_notes_impl(&pool, "покупки".into()).await.unwrap().is_empty(),
+            "заметка из Корзины нашлась через стеммированный индекс"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stemmed_hit_carries_a_readable_excerpt() {
+        let pool = test_pool().await;
+        create_note_impl(&pool, CreateNote {
+            title: "заметка".into(),
+            content: "сходить за покупками в субботу утром".into(),
+            tags: vec![],
+            linked_task_id: None,
+            project_id: None,
+        }).await.unwrap();
+
+        let found = search_notes_snippet_impl(&pool, "покупки".into()).await.unwrap();
+        assert_eq!(found.len(), 1);
+        // The excerpt comes from the note's own text, never from the stemmed
+        // index — a snippet() there would highlight "покупк" instead of a word.
+        assert!(
+            found[0].snippet.contains("покупками"),
+            "в выдержке нет текста заметки: {:?}", found[0].snippet
+        );
+        assert!(
+            !found[0].snippet.contains("покупк "),
+            "в выдержку просочился стем: {:?}", found[0].snippet
+        );
     }
 }

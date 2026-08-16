@@ -37,6 +37,12 @@ sysinfo = "0.33"
 # которым tauri резолвит app_data_dir — пути совпадают на всех ОС.
 dirs = "6"
 zip = "8.6.0"
+# Snowball stemming for note search. Pure Rust, no C dependency — checked before
+# choosing it, along with the two cheaper options that did not work: FTS5 ships a
+# `porter` tokenizer, but Porter is English (it finds "running" from "run" and
+# nothing at all for "покупки"/"покупок"), and `trigram` matches substrings but
+# makes snippet() highlight three letters instead of the word.
+rust-stemmers = "1.2"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"
 thiserror = "2.0.18"
