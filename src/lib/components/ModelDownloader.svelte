@@ -16,6 +16,7 @@
   let customUrl = $state("");
   let usingCustomUrl = $state(false);
   let exists = $state(false);
+  let installedUrl: string | null = $state(null);
   let sizeBytes = $state(0);
   let downloading = $state(false);
   let pct = $state(0);
@@ -33,6 +34,28 @@
     const s = await api.modelStatus(kind);
     exists = s.exists;
     sizeBytes = s.size_bytes;
+    installedUrl = s.installed_url;
+  }
+
+  /// Points the picker at the model that is actually installed.
+  ///
+  /// Without this the picker fell back to the recommended entry every time
+  /// Settings was reopened, so it claimed an install the user never made — the
+  /// file on disk has a fixed name and carries no identity, which is why the url
+  /// is remembered in settings instead.
+  ///
+  /// A url outside the catalogue means the user pasted their own, so the custom
+  /// field is reopened with it rather than silently losing it.
+  function selectInstalled() {
+    if (!installedUrl) return;
+    const match = options.find(o => o.url === installedUrl);
+    if (match) {
+      selectedId = match.id;
+      usingCustomUrl = false;
+    } else {
+      usingCustomUrl = true;
+      customUrl = installedUrl;
+    }
   }
 
   onMount(async () => {
@@ -41,6 +64,9 @@
       const recommended = options.find(o => o.recommended) ?? options[0];
       if (recommended) selectedId = recommended.id;
       await refresh();
+      // After refresh, so the installed model wins over the recommended default.
+      // The recommendation is only what to pick when nothing is installed yet.
+      selectInstalled();
       // Both pickers hear the same event, so each ignores the other's progress —
       // otherwise downloading the chat model would animate the voice picker too.
       unlisten = await listen<{ pct: number; kind: ModelKind }>("model-download-progress", ({ payload }) => {

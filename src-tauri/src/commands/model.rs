@@ -36,6 +36,18 @@ impl ModelKind {
             ModelKind::Whisper => "whisper.bin",
         }
     }
+
+    /// Where the url of the installed model is remembered.
+    ///
+    /// Needed because file_name() above is deliberately fixed: the file says a
+    /// model exists but not which one, and the picker has to show the one that
+    /// is actually installed rather than the recommended one.
+    pub fn installed_setting_key(self) -> &'static str {
+        match self {
+            ModelKind::Llm => "installed_model_url",
+            ModelKind::Whisper => "installed_whisper_url",
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -166,6 +178,10 @@ pub struct DownloadProgress {
 pub struct ModelStatus {
     pub exists: bool,
     pub size_bytes: u64,
+    /// The url of the model that is actually installed, or None when nothing was
+    /// downloaded through this app. `exists` alone cannot answer it: the file has
+    /// a fixed name and carries no identity.
+    pub installed_url: Option<String>,
 }
 
 fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -206,7 +222,23 @@ pub async fn model_status(app: AppHandle, kind: Option<ModelKind>) -> Result<Mod
     let kind = kind.unwrap_or(ModelKind::Llm);
     let path = models_dir(&app)?.join(kind.file_name());
     let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    Ok(ModelStatus { exists: path.exists(), size_bytes })
+    let exists = path.exists();
+
+    // Only report the remembered url while the file is really there: deleting the
+    // model outside the app would otherwise leave the picker claiming an install
+    // that no longer exists.
+    let installed_url = if exists {
+        match app.try_state::<sqlx::SqlitePool>() {
+            Some(pool) => {
+                crate::commands::settings::get_setting(pool.inner(), kind.installed_setting_key()).await
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(ModelStatus { exists, size_bytes, installed_url })
 }
 
 #[tauri::command]
@@ -248,6 +280,22 @@ pub async fn download_model(app: AppHandle, url: String, kind: Option<ModelKind>
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&part_path, &final_path).map_err(|e| e.to_string())?;
+
+    // Remember WHICH model this is. The file is always saved under the same name
+    // (model.gguf), so the filesystem cannot answer the question afterwards, and
+    // without an answer the picker had nothing to restore: it fell back to the
+    // recommended entry every time Settings was reopened, silently misreporting
+    // what is actually installed.
+    //
+    // Written after the rename, not before: only a finished download is a model
+    // the user has. The url is stored rather than the catalogue id, because a
+    // custom url has no id at all, and matching by url covers both cases.
+    if let Some(pool) = app.try_state::<sqlx::SqlitePool>() {
+        let _ = crate::commands::settings::set_setting(
+            pool.inner(), kind.installed_setting_key(), &url,
+        ).await;
+    }
+
     let _ = app.emit("model-download-progress", DownloadProgress { downloaded, total, pct: 100, kind });
     Ok(())
 }
@@ -334,5 +382,28 @@ mod tests {
     fn kind_serializes_as_lowercase() {
         assert_eq!(serde_json::to_string(&ModelKind::Llm).unwrap(), "\"llm\"");
         assert_eq!(serde_json::to_string(&ModelKind::Whisper).unwrap(), "\"whisper\"");
+    }
+
+    #[test]
+    fn every_kind_remembers_its_install_under_its_own_key() {
+        // The two kinds share the download code, so a single key would make the
+        // whisper download overwrite which chat model is installed.
+        let llm = ModelKind::Llm.installed_setting_key();
+        let whisper = ModelKind::Whisper.installed_setting_key();
+        assert_ne!(llm, whisper, "оба вида пишут в один ключ — установка одного затрёт другой");
+        assert!(!llm.is_empty() && !whisper.is_empty());
+    }
+
+    #[test]
+    fn the_file_name_cannot_identify_the_model() {
+        // The reason the url has to be remembered at all: every chat model lands
+        // in the same file, so the disk cannot answer "which one is installed?".
+        // If this ever stops holding, the setting can go away — but it must be a
+        // deliberate change, not a silent one.
+        assert!(model_catalog().len() > 1, "в каталоге одна модель — тест бессмысленен");
+        assert_eq!(
+            ModelKind::Llm.file_name(), "model.gguf",
+            "имя файла перестало быть фиксированным — пересмотреть, нужен ли installed_setting_key"
+        );
     }
 }

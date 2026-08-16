@@ -821,7 +821,7 @@
         error: null,
       }), 0);
     },
-    model_status: ({ kind }) => db.models?.[kind ?? "llm"] ?? { exists: false, size_bytes: 0 },
+    model_status: ({ kind }) => db.models?.[kind ?? "llm"] ?? { exists: false, size_bytes: 0, installed_url: null },
     // v0.9.28: путь приходит от бэкенда (app_data_dir зависит от ОС), в моке
     // отдаём линуксовый вид — тест проверяет, что показан ответ команды, а не
     // зашитая в UI строка.
@@ -867,8 +867,14 @@
       db.voiceRecording = false;
       persist();
     },
-    download_model: ({ kind }) => {
-      db.models = { ...(db.models ?? {}), [kind ?? "llm"]: { exists: true, size_bytes: 1024 } };
+    // Запоминает, КАКАЯ модель скачана: файл на диске всегда с одним именем, и
+    // без этого подборщик после перезахода показывал рекомендованную вместо
+    // установленной (v0.10.22).
+    download_model: ({ url, kind }) => {
+      db.models = {
+        ...(db.models ?? {}),
+        [kind ?? "llm"]: { exists: true, size_bytes: 1024, installed_url: url ?? null },
+      };
       persist();
     },
     export: () => {},

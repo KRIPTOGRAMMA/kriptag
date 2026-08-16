@@ -150,7 +150,8 @@ export const api = {
   // kind is optional on every model command: omitting it means the chat model,
   // which is what these calls meant before voice input existed.
   listModelOptions: (kind?: ModelKind) => invoke<ModelOption[]>("list_model_options", { kind }),
-  modelStatus: (kind?: ModelKind) => invoke<{ exists: boolean; size_bytes: number }>("model_status", { kind }),
+  modelStatus: (kind?: ModelKind) =>
+    invoke<{ exists: boolean; size_bytes: number; installed_url: string | null }>("model_status", { kind }),
   modelPath: (kind?: ModelKind) => invoke<string>("model_path", { kind }),
   downloadModel: (url: string, kind?: ModelKind) => invoke<void>("download_model", { url, kind }),
   // Voice input. voiceAvailable is capability detection: both the model and the

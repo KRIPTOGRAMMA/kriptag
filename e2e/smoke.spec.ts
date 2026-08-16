@@ -4227,6 +4227,60 @@ test("настройки: список локальных моделей — к�
   await expect(llmPicker.locator("label", { hasText: "Свой URL" }).locator("input[type=radio]")).toBeChecked();
 });
 
+// v0.10.22: подборщик всегда вставал на рекомендованную модель при открытии, и
+// после перезахода в Настройки показывал не ту, что установлена. Причина — не
+// забытая мелочь в UI, а отсутствующие данные: файл на диске всегда называется
+// одинаково (model.gguf) и не несёт, какая это модель. Теперь url скачанной
+// модели помнится в настройках и подборщик встаёт на него.
+test("настройки: подборщик показывает установленную модель, а не рекомендованную", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.getByRole("tab", { name: "ИИ", exact: true }).click();
+
+  const llmPicker = page.locator(".model-picker").filter({ hasText: "Qwen2.5" });
+  const recommended = llmPicker.locator("label", { hasText: "Qwen2.5 1.5B Instruct" });
+  const phi = llmPicker.locator("label", { hasText: "Phi-3.5 Mini Instruct" });
+
+  // Выбираем НЕ рекомендованную и скачиваем.
+  await phi.click();
+  await llmPicker.getByRole("button", { name: "Скачать модель" }).click();
+  await expect(llmPicker.getByText(/Модель загружена/)).toBeVisible();
+
+  // Уходим и возвращаемся — ровно то, что делает пользователь.
+  await page.getByRole("button", { name: "Задачи" }).click();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.getByRole("tab", { name: "ИИ", exact: true }).click();
+
+  await expect(phi.locator("input[type=radio]")).toBeChecked();
+  await expect(recommended.locator("input[type=radio]")).not.toBeChecked();
+});
+
+test("настройки: подборщик помнит свой URL, а не сбрасывает его на рекомендованную", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.getByRole("tab", { name: "ИИ", exact: true }).click();
+
+  const llmPicker = page.locator(".model-picker").filter({ hasText: "Qwen2.5" });
+  // У своего URL нет id в каталоге, поэтому восстановление идёт по url —
+  // иначе выбор пользователя молча терялся бы именно в этом случае.
+  await page.getByPlaceholder("https://.../model.gguf").fill("https://example.com/custom.gguf");
+  await llmPicker.getByRole("button", { name: "Скачать модель" }).click();
+  await expect(llmPicker.getByText(/Модель загружена/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Задачи" }).click();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.getByRole("tab", { name: "ИИ", exact: true }).click();
+
+  await expect(llmPicker.locator("label", { hasText: "Свой URL" }).locator("input[type=radio]")).toBeChecked();
+  await expect(page.getByPlaceholder("https://.../model.gguf")).toHaveValue("https://example.com/custom.gguf");
+});
+
 test("настройки: хоткеи — переназначение применяется, дефолтная комбинация перестаёт работать", async ({ page }) => {
   await withMock(page);
   await page.goto("/");
