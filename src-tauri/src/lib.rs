@@ -279,6 +279,25 @@ fn update_quiet_labels(app: &tauri::AppHandle, active_id: &str, remaining_mins: 
     }
 }
 
+/// What the main window remembers between launches.
+///
+/// Deliberately not `StateFlags::all()`, which is the plugin's default. That set
+/// also carries DECORATIONS and VISIBLE, and both undo a decision made elsewhere:
+/// the plugin calls `set_decorations(state.decorated)`, which would put the
+/// system title bar back over the one this app draws itself, and it calls
+/// `show()`, which would reveal a window whose config says `visible: false`.
+///
+/// One constant because these flags are used twice — once when registering the
+/// plugin, once when saving on hide. Two lists would drift apart silently: the
+/// saved state would carry fields the restore ignores, or the reverse.
+const WINDOW_STATE_FLAGS: tauri_plugin_window_state::StateFlags = {
+    use tauri_plugin_window_state::StateFlags;
+    StateFlags::SIZE
+        .union(StateFlags::POSITION)
+        .union(StateFlags::MAXIMIZED)
+        .union(StateFlags::FULLSCREEN)
+};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // `kriptag --status` is a short-lived CLI for status bars (waybar): it prints
@@ -306,6 +325,29 @@ pub fn run() {
                         let _ = w.set_focus();
                     }
                 }))
+                // Without this the main window opens at the 800x600 from
+                // tauri.conf.json on every launch, so a maximised window had to be
+                // maximised again by hand each time — most visibly at login, where
+                // autostart brings it up small.
+                //
+                // The flag set is deliberately not the default. `StateFlags::all()`
+                // also restores DECORATIONS and VISIBLE, and both are wrong here:
+                // the plugin calls `set_decorations(state.decorated)`, which would
+                // put the system title bar back over the one this app draws itself
+                // (decorations: false is a deliberate choice, see v0.9.40), and it
+                // calls `show()`, which would reveal quick capture — a window whose
+                // whole design is to stay hidden until a hotkey asks for it.
+                //
+                // Quick capture is denylisted for the same reason its config says
+                // `center: true` and a fixed size: it is a popup, not a workspace.
+                // Restoring its geometry would drop it wherever it was last used
+                // instead of in front of the user.
+                .plugin(
+                    tauri_plugin_window_state::Builder::new()
+                        .with_state_flags(WINDOW_STATE_FLAGS)
+                        .with_denylist(&["quick-task"])
+                        .build(),
+                )
                 .plugin(tauri_plugin_opener::init())
                 .plugin(tauri_plugin_notification::init())
                 .plugin(tauri_plugin_autostart::init(
@@ -568,6 +610,24 @@ pub fn run() {
                         main_win.on_window_event(move |event| {
                             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                                 api.prevent_close();
+
+                                // Write the geometry to disk here, not only on exit.
+                                //
+                                // The window-state plugin flushes on RunEvent::Exit,
+                                // and this app reaches that only through the tray's
+                                // "Выход". Closing the window hides it and the
+                                // process keeps running, so a session that ends any
+                                // other way — logout, reboot, a crash — would lose
+                                // the size the user had just chosen. Hiding is the
+                                // moment they are done with the window, which makes
+                                // it the honest moment to record how they left it.
+                                //
+                                // Saving before hide(): the plugin reads the live
+                                // geometry, and a hidden window can report nothing
+                                // useful.
+                                use tauri_plugin_window_state::AppHandleExt;
+                                let _ = win.app_handle().save_window_state(WINDOW_STATE_FLAGS);
+
                                 let _ = win.hide();
                             }
                         });
@@ -774,6 +834,73 @@ mod tests {
 
     fn now() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 14, 12, 0, 0).unwrap()
+    }
+
+    /// The production half of this file.
+    ///
+    /// include_str! reads the tests too, so a guard looking for a literal finds
+    /// its own text and passes on broken code. Same split, and same reason, as
+    /// the one in ai/sidecar.rs.
+    fn production_src() -> &'static str {
+        const SRC: &str = include_str!("lib.rs");
+        SRC.split(concat!("#[cfg(", "test)]")).next().unwrap_or("")
+    }
+
+    #[test]
+    fn hiding_the_main_window_writes_its_geometry_to_disk() {
+        // The plugin only flushes to disk on RunEvent::Exit, which this app
+        // reaches through one path: "Выход" in the tray. Closing the window hides
+        // it and the process lives on, so a session ending any other way — logout,
+        // reboot, a crash — would lose the size just chosen. Verified live: after
+        // the plugin was wired up but before this save, no state file existed.
+        let src = production_src();
+        let hide_arm = src
+            .split("api.prevent_close();")
+            .nth(1)
+            .and_then(|rest| rest.split("win.hide()").next())
+            .expect("не найден обработчик скрытия главного окна");
+        assert!(
+            hide_arm.contains("save_window_state"),
+            "размер окна не сохраняется при скрытии — переживёт только выход \
+             через трей, но не выключение компьютера"
+        );
+    }
+
+    #[test]
+    fn window_state_restores_geometry_but_not_decorations_or_visibility() {
+        let src = production_src();
+
+        // Geometry is the whole point: without it the main window reopens at the
+        // 800x600 from tauri.conf.json every launch, which is what made a
+        // maximised window have to be maximised again after every login.
+        for flag in ["StateFlags::SIZE", "StateFlags::POSITION", "StateFlags::MAXIMIZED"] {
+            assert!(
+                src.contains(flag),
+                "{flag} не восстанавливается — окно снова будет открываться \
+                 размером из конфига, а не таким, каким его оставили"
+            );
+        }
+
+        // The two the default `StateFlags::all()` would add, and both break a
+        // deliberate decision elsewhere in this file: DECORATIONS puts the system
+        // title bar back over the one the app draws itself, VISIBLE calls show()
+        // on a window whose config says visible: false.
+        for flag in ["StateFlags::DECORATIONS", "StateFlags::VISIBLE"] {
+            assert!(
+                !src.contains(flag),
+                "{flag} восстанавливается: вернёт системную рамку поверх своей \
+                 (decorations: false) либо покажет окно быстрого ввода, которое \
+                 должно оставаться скрытым до горячей клавиши"
+            );
+        }
+
+        // Quick capture is a popup: fixed size, centered, hidden until asked for.
+        // Restoring its geometry would put it wherever it was last used.
+        assert!(
+            src.contains(r#".with_denylist(&["quick-task"])"#),
+            "окно быстрого ввода не исключено — его положение начнёт сохраняться, \
+             и всплывашка перестанет появляться по центру"
+        );
     }
 
     #[test]

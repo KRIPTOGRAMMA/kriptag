@@ -57,6 +57,7 @@ base64 = "0.22"
 # takes the config by reference here, by value in 0.18).
 cpal = "0.17"
 hound = "3.5.1"
+tauri-plugin-window-state = "2.4.1"
 
 # Buttons in notifications: tauri-plugin-notification accepts them in its builder
 # but ignores them entirely on desktop (verified against 2.3.3, desktop.rs::show()
