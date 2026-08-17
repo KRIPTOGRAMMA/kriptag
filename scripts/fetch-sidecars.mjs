@@ -16,7 +16,8 @@ import { createWriteStream } from "node:fs";
 import { mkdir, chmod, stat, writeFile, readFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 // Collected so the script can end with a non-zero status when something a build
 // actually needs is absent.
@@ -52,7 +53,40 @@ async function download(url, dest) {
 // MZ header — `file` reports it as "DOS/MBR boot sector" on Linux.
 async function fetchLlamafile({ triple, exe }) {
   const dest = join(OUT, `llamafile-${triple}${exe}`);
-  if (await exists(dest)) { console.log(`  = llamafile-${triple}${exe} already here`); return; }
+  if (await exists(dest)) {
+    // "Already here" says nothing about *which* version is here, and the file is
+    // gitignored, so nothing else does either. That gap shipped a bug: this
+    // machine kept a 0.9.3 left over from an earlier LLAMAFILE_VERSION and ran
+    // it happily for months, while a clean build downloaded 0.10.5 — which had
+    // dropped a flag the code still passed. Every local test passed; the Windows
+    // package could not load a model at all.
+    //
+    // Asking the binary its version costs one exec and turns a silent skip into
+    // a visible mismatch. It is not fixed automatically: the file may be a
+    // deliberate local build, and deleting 300 MB of someone's work to re-fetch
+    // it is not this script's call.
+    let have = "unknown";
+    try {
+      const out = execFileSync(resolve(dest), ["--version"], {
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      have = out.trim().split("\n")[0].replace(/^llamafile\s+v?/, "");
+    } catch {
+      // Unreadable or not executable — reported as a mismatch below, since an
+      // unusable binary is worse than a stale one.
+    }
+    if (have === LLAMAFILE_VERSION) {
+      console.log(`  = llamafile-${triple}${exe} already here (v${have})`);
+    } else {
+      console.log(
+        `  ! llamafile-${triple}${exe} is v${have}, expected v${LLAMAFILE_VERSION}\n` +
+        `    Flags differ between versions — delete it and re-run to match the build.`,
+      );
+    }
+    return;
+  }
   await download(
     `https://github.com/Mozilla-Ocho/llamafile/releases/download/${LLAMAFILE_VERSION}/llamafile-${LLAMAFILE_VERSION}`,
     dest,

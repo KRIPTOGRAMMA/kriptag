@@ -77,10 +77,21 @@ pub async fn ensure_running(app: &AppHandle, state: &SharedSidecar) -> Result<u1
         .shell()
         .sidecar(SIDECAR)
         .map_err(|e| format!("sidecar lookup failed: {e}"))?
+        // Deliberately only the flags 0.10.5 still accepts.
+        //
+        // `--nobrowser` used to be here and is why the first Windows package
+        // could not start the model at all: llamafile removed the flag, and an
+        // unknown argument is fatal — "error: invalid argument: --nobrowser",
+        // exit 256, before the model is even opened. It went unnoticed locally
+        // because the binaries directory is gitignored and the fetch script
+        // skips a file that is already there, so this machine kept an old 0.9.3
+        // that still understood the flag while the build shipped 0.10.5.
+        //
+        // Nothing replaces it: `--server` in 0.10.5 is the API server and opens
+        // no browser tab. Verified against the real binary, not the changelog.
         .args([
             "--server",
             "--port", &port.to_string(),
-            "--nobrowser",
             "-m", model_path.to_str().unwrap(),
         ]);
 
@@ -362,6 +373,38 @@ mod tests {
             "бюджет старта {} с — мало для многогигабайтной модели при холодном чтении с диска",
             STARTUP_BUDGET.as_secs()
         );
+    }
+
+    #[test]
+    fn every_flag_passed_to_llamafile_still_exists() {
+        // The bug this file exists to prevent, in its most recent form: llamafile
+        // dropped `--nobrowser` between 0.9.3 and 0.10.5, an unknown argument is
+        // fatal rather than ignored, and the Windows package therefore died with
+        // "error: invalid argument: --nobrowser" before touching the model.
+        //
+        // The allow-list is small on purpose and every entry was run against the
+        // real 0.10.5 binary. When the sidecar version is bumped, this test is
+        // the place that has to be re-checked the same way — the point is that
+        // adding a flag from memory cannot pass silently.
+        const KNOWN_GOOD: [&str; 3] = ["--server", "--port", "-m"];
+
+        let args = production_src()
+            .split(".args([")
+            .nth(1)
+            .and_then(|rest| rest.split("]);").next())
+            .expect("не найден список аргументов сайдкара");
+
+        for flag in args
+            .split('"')
+            .filter(|s| s.starts_with('-') && !s.contains(char::is_whitespace))
+        {
+            assert!(
+                KNOWN_GOOD.contains(&flag),
+                "флаг {flag} не подтверждён на llamafile 0.10.5 — неизвестный аргумент \
+                 фатален, модель не запустится вообще; проверьте на живом бинарнике \
+                 и добавьте в KNOWN_GOOD"
+            );
+        }
     }
 
     #[test]
