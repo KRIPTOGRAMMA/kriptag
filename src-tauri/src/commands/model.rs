@@ -184,7 +184,9 @@ pub struct ModelStatus {
     pub installed_url: Option<String>,
 }
 
-fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
+// Also the working directory whisper is run from, so that the model and the
+// recording can both be named relatively — see voice/mod.rs.
+pub(crate) fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)

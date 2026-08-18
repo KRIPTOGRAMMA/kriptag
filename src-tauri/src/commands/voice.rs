@@ -44,9 +44,17 @@ pub async fn start_voice_recording(
 
 /// Stops the recording and returns the recognised text.
 ///
-/// The WAV goes to a temporary file rather than into the app's data directory:
-/// it is an intermediate that whisper reads once, and it is removed even when
-/// recognition fails — a dictated phrase should not linger on disk.
+/// The WAV is written into the models directory rather than the system temp
+/// folder, and that is a deliberate change from the obvious choice.
+///
+/// whisper is handed both files as command-line arguments, and on Windows it
+/// cannot open a path containing non-ASCII characters (whisper.cpp issue #1955):
+/// argv arrives in the system ANSI encoding and a Cyrillic user name turns into
+/// mush. The fix is to name both files RELATIVELY, which requires them to share
+/// one directory — and the model cannot move, so the recording does.
+///
+/// It is still an intermediate that whisper reads once, and it is still removed
+/// even when recognition fails: a dictated phrase should not linger on disk.
 #[tauri::command]
 pub async fn stop_voice_recording(
     app: AppHandle,
@@ -57,7 +65,8 @@ pub async fn stop_voice_recording(
         slot.take().ok_or("Запись не была начата.")?
     };
 
-    let wav = std::env::temp_dir().join(format!("kriptag-voice-{}.wav", uuid::Uuid::new_v4()));
+    let wav = crate::commands::model::models_dir(&app)?
+        .join(format!("kriptag-voice-{}.wav", uuid::Uuid::new_v4()));
     recording.stop_to_wav(&wav)?;
 
     let result = crate::voice::transcribe(&app, &wav).await;

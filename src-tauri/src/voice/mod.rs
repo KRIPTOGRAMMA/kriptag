@@ -7,7 +7,7 @@
 
 pub mod audio;
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
 
 /// The sidecar's name as tauri-plugin-shell expects it: a bare name, not a path.
@@ -126,24 +126,50 @@ fn sidecar_file_name() -> String {
 /// nonsense rather than an error (verified: forcing `-l ru` on English speech
 /// returned a mangled half-translation).
 pub async fn transcribe(app: &AppHandle, wav: &std::path::Path) -> Result<String, String> {
-    let model = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("models")
-        .join(crate::commands::model::ModelKind::Whisper.file_name());
+    // The one directory both files live in, and the working directory whisper is
+    // run from below. Taken from the same helper that download_model() writes
+    // through, so the two cannot drift apart.
+    let models_dir = crate::commands::model::models_dir(app)?;
 
-    if !model.exists() {
+    let model_file = crate::commands::model::ModelKind::Whisper.file_name();
+    if !models_dir.join(model_file).exists() {
         return Err("Модель распознавания не найдена. Скачайте её в настройках.".into());
     }
+
+    // The recording is written into that same directory by stop_voice_recording,
+    // precisely so it can be named relatively here.
+    let wav_file = wav
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Некорректное имя файла записи")?;
 
     let output = app
         .shell()
         .sidecar(SIDECAR)
         .map_err(|e| format!("Не удалось найти whisper-cli: {e}"))?
+        // Run from the directory holding both files, so neither has to be named
+        // by an absolute path below.
+        .current_dir(models_dir)
+        // Both files are named RELATIVELY, and that is the whole point.
+        //
+        // On Windows whisper cannot open a path containing non-ASCII characters
+        // (whisper.cpp issue #1955): argv reaches it in the system ANSI encoding,
+        // so `C:\Users\Талгат\...` arrives mangled and the file "is not found"
+        // while sitting plainly on disk. The process then dies without writing a
+        // single line to stderr, which is why this surfaced as an exit code and
+        // no message at all.
+        //
+        // A bare file name carries none of that: no Cyrillic, no spaces, no
+        // separators. `current_dir` above is what makes it resolve, and the
+        // working directory is passed to the process by the OS rather than
+        // through argv, so it is not subject to the same mangling.
+        //
+        // Not reproducible on Linux — paths there are UTF-8 bytes end to end,
+        // verified by running whisper through a directory named `Талгат`, which
+        // worked. Same blind spot as the model path in v0.10.25.
         .args([
-            "-m", model.to_str().ok_or("Некорректный путь к модели")?,
-            "-f", wav.to_str().ok_or("Некорректный путь к записи")?,
+            "-m", model_file,
+            "-f", wav_file,
             "-l", "auto",
             "-np",
             "-nt",
@@ -190,6 +216,16 @@ pub async fn transcribe(app: &AppHandle, wav: &std::path::Path) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production half of this file.
+    ///
+    /// include_str! reads the tests too, so a guard looking for a literal finds
+    /// its own text and passes on broken code. Same split, and same reason, as
+    /// the one in ai/sidecar.rs.
+    fn production_src() -> &'static str {
+        const SRC: &str = include_str!("mod.rs");
+        SRC.split(concat!("#[cfg(", "test)]")).next().unwrap_or("")
+    }
 
     // whisper marks silence with [BLANK_AUDIO]; pasting that into a note would be
     // worse than pasting nothing.
@@ -286,13 +322,8 @@ options:
     // is on the source because the branch needs an AppHandle to reach otherwise.
     #[test]
     fn a_failure_is_not_judged_by_the_exit_status_alone() {
-        let src = include_str!("mod.rs");
-        let production = src
-            .split(concat!("#[cfg(", "test)]"))
-            .next()
-            .expect("не найден производственный код");
         assert!(
-            production.contains("!output.status.success() || reason.is_some()"),
+            production_src().contains("!output.status.success() || reason.is_some()"),
             "провал определяется только кодом возврата — whisper печатает \
              `error: unknown argument` и выходит с нулём, и такой прогон \
              будет принят за успех"
@@ -309,6 +340,85 @@ options:
     // Found only by running the app — nothing in the suite covered it. The test
     // repeats the same path arithmetic. Matching against the source text is not an
     // option: such a check trips over its own comment (tried).
+    // On Windows whisper cannot open a path with non-ASCII characters
+    // (whisper.cpp #1955): argv arrives in the system ANSI encoding, a Cyrillic
+    // user name is mangled, and the process dies without writing to stderr — the
+    // exit code with an empty message the user actually saw. Linux paths are
+    // UTF-8 throughout, so this can never be caught by running it here.
+    //
+    // The guard is on the ARGUMENTS, not on the presence of `current_dir`:
+    // whatever the mechanism, what must stay true is that nothing path-shaped
+    // reaches that command line.
+    #[test]
+    fn neither_file_is_passed_as_a_path() {
+        let args = production_src()
+            .split(".args([")
+            .nth(1)
+            .and_then(|rest| rest.split("])").next())
+            .expect("не найден список аргументов whisper");
+
+        // Checked POSITIVELY — the argument must be one of the two known bare-name
+        // bindings. A negative check ("does not contain to_str") is not enough:
+        // hoisting `let x = path.to_str()?` above the list leaves an argument that
+        // merely looks innocent, and the guard passes on genuinely broken code.
+        // Verified — that exact rewrite defeated the first version of this test.
+        for (flag, expected, name) in [
+            ("\"-m\"", "model_file", "модели"),
+            ("\"-f\"", "wav_file", "записи"),
+        ] {
+            let value = args
+                .split(flag)
+                .nth(1)
+                .unwrap_or_else(|| panic!("аргумент {flag} не найден"))
+                .split(',')
+                .nth(1)
+                .unwrap_or_else(|| panic!("у {flag} нет значения"))
+                .trim();
+
+            assert_eq!(
+                value, expected,
+                "аргумент {flag} — не голое имя файла: на Windows кириллица в пути \
+                 приедет искажённой и файл «не найдётся». Ожидалось `{expected}` \
+                 (имя относительно current_dir), получено `{value}`. Путь к {name} \
+                 не должен попадать в командную строку ни в каком виде."
+            );
+        }
+
+        // The bare names must genuinely BE bare — the bindings above are only
+        // trustworthy if nothing joins a directory onto them on the way here.
+        let src = production_src();
+        assert!(
+            src.contains("let model_file = crate::commands::model::ModelKind::Whisper.file_name()"),
+            "model_file больше не имя файла из ModelKind — проверьте, что в него \
+             не попал путь"
+        );
+        assert!(
+            src.contains("let wav_file = wav")
+                && src.contains(".file_name()"),
+            "wav_file больше не берётся через file_name() — в аргумент может \
+             попасть полный путь к записи"
+        );
+    }
+
+    // The relative names above only resolve because the process is started in the
+    // directory holding both files. Losing this turns both arguments into names
+    // pointing at nothing.
+    #[test]
+    fn whisper_runs_in_the_directory_holding_both_files() {
+        let src = production_src();
+        assert!(
+            src.contains(".current_dir(models_dir)"),
+            "рабочий каталог не задан — относительные имена файлов не разрешатся"
+        );
+        // The recording has to be written there too, or its bare name is a lie.
+        let cmd = include_str!("../commands/voice.rs");
+        assert!(
+            cmd.contains("models_dir(&app)"),
+            "запись сохраняется не в папку моделей — её имя перестанет \
+             разрешаться относительно рабочего каталога whisper"
+        );
+    }
+
     // `sidecar()` only joins paths — reading tauri-plugin-shell's own
     // `relative_command_path` confirms it never calls exists() — so `.is_ok()`
     // was true even on a build carrying no whisper-cli. The microphone button
