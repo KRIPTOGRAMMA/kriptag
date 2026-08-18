@@ -26,9 +26,11 @@ pub type SharedSidecar = Mutex<SidecarState>;
 /// correct there — it must not be repeated here. See voice/mod.rs, where the same
 /// mistake broke speech recognition outright.
 ///
-/// The wrapper is a Unix shell script whose only job is `cd /tmp`: llamafile
-/// writes into the working directory, which beside the installed binary is either
-/// read-only or the wrong place. On Windows it does not exist — a sidecar there
+/// The wrapper is a Unix shell script that only locates llamafile beside itself
+/// and execs it. It used to `cd /tmp` as well, because llamafile writes into its
+/// working directory; that is now the caller's job below, which sets the models
+/// directory explicitly and needs the wrapper to leave it alone.
+/// On Windows the wrapper does not exist — a sidecar there
 /// must be a real PE binary under a `.exe` name, so scripts/fetch-sidecars.mjs
 /// neither writes one nor leaves it in externalBin. Asking for it anyway is what
 /// made the model unusable in the first Windows package: the file is simply not
@@ -61,15 +63,29 @@ pub async fn ensure_running(app: &AppHandle, state: &SharedSidecar) -> Result<u1
         return wait_for_ready(existing_port).await.map(|_| existing_port);
     }
 
+    // Taken from ModelKind rather than spelled out, because this name is passed
+    // to llamafile as a bare relative argument below: a literal here that drifted
+    // from the one download_model() writes would look like a missing model.
+    let model_file = crate::commands::model::ModelKind::Llm.file_name();
+
     let model_path = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
-        .join("models/model.gguf");
+        .join("models")
+        .join(model_file);
 
     if !model_path.exists() {
         return Err("Модель не найдена. Скачайте модель в настройках.".into());
     }
+
+    // The directory the model lives in, and from now on the working directory
+    // llamafile runs in. Both the `-m` argument and `current_dir` are derived
+    // from it, so they cannot drift apart.
+    let models_dir = model_path
+        .parent()
+        .ok_or_else(|| "путь к модели без родительской папки".to_string())?
+        .to_path_buf();
 
     let port = pick_free_port();
 
@@ -77,6 +93,9 @@ pub async fn ensure_running(app: &AppHandle, state: &SharedSidecar) -> Result<u1
         .shell()
         .sidecar(SIDECAR)
         .map_err(|e| format!("sidecar lookup failed: {e}"))?
+        // Run from the models directory, so the model can be named relatively
+        // below. Set BEFORE the arguments purely so the two read together.
+        .current_dir(models_dir)
         // Deliberately only the flags 0.10.5 still accepts.
         //
         // `--nobrowser` used to be here and is why the first Windows package
@@ -89,24 +108,31 @@ pub async fn ensure_running(app: &AppHandle, state: &SharedSidecar) -> Result<u1
         //
         // Nothing replaces it: `--server` in 0.10.5 is the API server and opens
         // no browser tab. Verified against the real binary, not the changelog.
+        //
+        // ---
+        //
+        // The model is named RELATIVELY, and that is the whole point.
+        //
+        // llamafile is an APE binary: on Windows it does not receive a parsed
+        // argv from the OS, it re-parses the raw command line itself, splitting
+        // on whitespace the Unix way. An absolute Windows path is
+        // `C:\Users\<name>\AppData\Roaming\com.kriptag.app\models\model.gguf`,
+        // and the moment the account name contains a space it arrives as two
+        // arguments — `-m` gets only the first half and the model "is not
+        // found" even though it is plainly on disk. Backslashes are the second
+        // hazard: to that parser they read as escapes, not separators.
+        //
+        // A bare filename has neither spaces nor separators, so there is
+        // nothing left to misparse. `current_dir` above is what makes it
+        // resolve, and both come from the same `models_dir`.
+        //
+        // Note this cannot be reproduced on Linux — the paths there have no
+        // spaces and no backslashes, which is exactly why it shipped.
         .args([
             "--server",
             "--port", &port.to_string(),
-            "-m", model_path.to_str().unwrap(),
+            "-m", model_file,
         ]);
-
-    // llamafile writes into its working directory, and on Windows there is no
-    // wrapper to cd out of the install folder first — the Unix one is a shell
-    // script, which a .exe sidecar cannot be. Left alone the working directory is
-    // wherever the app was started from, typically Program Files, where an
-    // ordinary user cannot write. The models directory is ours and always
-    // writable, so it is the honest choice on every platform; on Unix the wrapper
-    // already moved us elsewhere and this simply makes the location explicit
-    // rather than inherited.
-    let sidecar = match model_path.parent() {
-        Some(dir) => sidecar.current_dir(dir.to_path_buf()),
-        None => sidecar,
-    };
 
     let (mut events, child) = sidecar.spawn().map_err(|e| format!("spawn failed: {e}"))?;
 
@@ -405,6 +431,60 @@ mod tests {
                  и добавьте в KNOWN_GOOD"
             );
         }
+    }
+
+    #[test]
+    fn the_model_is_passed_as_a_bare_relative_name() {
+        // llamafile re-parses the raw Windows command line itself, splitting on
+        // whitespace, so an absolute path under `C:\Users\<name with a space>`
+        // reaches `-m` cut in half and the model reads as missing while sitting
+        // plainly on disk. Linux paths have neither spaces nor backslashes,
+        // which is why this can never be caught by running it here.
+        //
+        // The guard is on the ARGUMENT, not on the presence of some helper:
+        // whatever the mechanism, what must stay true is that nothing
+        // path-shaped goes onto that command line.
+        let args = production_src()
+            .split(".args([")
+            .nth(1)
+            .and_then(|rest| rest.split("]);").next())
+            .expect("не найден список аргументов сайдкара");
+
+        let model_arg = args
+            .split("\"-m\"")
+            .nth(1)
+            .expect("аргумент -m не найден")
+            .split(',')
+            .nth(1)
+            .expect("у -m нет значения");
+
+        assert!(
+            !model_arg.contains("model_path") && !model_arg.contains("app_data_dir"),
+            "путь к модели передаётся абсолютным ({}) — на Windows пробел в имени \
+             пользователя разрежет его на два аргумента и модель «не найдётся»; \
+             передавайте имя файла относительно current_dir",
+            model_arg.trim()
+        );
+    }
+
+    #[test]
+    fn the_unix_wrapper_keeps_the_working_directory_it_is_given() {
+        // The relative `-m` above only resolves if nothing moves the process
+        // afterwards. The wrapper used to `cd /tmp` for its own reasons, which
+        // would now silently break model loading on Linux — the opposite
+        // platform from the one the relative path was introduced for.
+        let script = include_str!("../../../scripts/fetch-sidecars.mjs");
+        let body = script
+            .split("async function writeWrapper")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("не найдена функция writeWrapper");
+
+        assert!(
+            !body.contains("\"cd "),
+            "обёртка меняет рабочий каталог — относительный путь к модели \
+             перестанет разрешаться, и модель не загрузится на Linux"
+        );
     }
 
     #[test]

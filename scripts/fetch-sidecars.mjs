@@ -130,8 +130,16 @@ async function fetchWhisper({ triple, exe }) {
 }
 
 
-// The wrapper exists because llamafile writes into the working directory, so it
-// is launched from /tmp rather than from wherever the app happens to be.
+// The wrapper exists only to find llamafile next to itself and exec it.
+//
+// It used to `cd /tmp` first, because llamafile writes into its working
+// directory and the install folder may be read-only. That job now belongs to
+// the caller: sidecar.rs sets current_dir to the models directory, which is
+// always writable, and passes the model as a BARE RELATIVE NAME so that a
+// Windows path containing spaces cannot be split by llamafile's own APE
+// command-line parser. A `cd` here would move the process away from that
+// directory and the relative name would resolve to nothing — the wrapper must
+// therefore inherit the working directory it is given, not choose one.
 //
 // On Windows there is no wrapper at all. Tauri names a sidecar
 // `<name>-<triple>.exe`, and a .exe has to be a real PE binary — a batch script
@@ -145,11 +153,26 @@ async function writeWrapper({ triple, exe }) {
   }
   const dest = join(OUT, `llamafile-wrapper-${triple}${exe}`);
   if (await exists(dest)) { console.log(`  = llamafile-wrapper already here`); return; }
+  // Both names are tried because the file is called different things at the two
+  // moments this script has to serve. In the source tree the sidecar keeps its
+  // target triple (`llamafile-x86_64-unknown-linux-gnu`), which is how `tauri
+  // dev` runs it; when bundling, Tauri strips the triple and installs plain
+  // `llamafile` next to the wrapper. A wrapper that knew only one of the two
+  // worked in exactly one of those situations and reported "binary not found"
+  // in the other.
   await writeFile(dest, [
     "#!/bin/sh",
+    "# No `cd`: the caller sets the working directory and passes the model as a",
+    "# relative name. See the comment above writeWrapper().",
     'DIR="$(dirname "$0")"',
-    "cd /tmp",
-    `exec "$DIR/llamafile-${triple}${exe}" "$@"`,
+    'if [ -f "$DIR/llamafile" ]; then',
+    '  exec "$DIR/llamafile" "$@"',
+    `elif [ -f "$DIR/llamafile-${triple}${exe}" ]; then`,
+    `  exec "$DIR/llamafile-${triple}${exe}" "$@"`,
+    "else",
+    '  echo "llamafile binary not found" >&2',
+    "  exit 1",
+    "fi",
     "",
   ].join("\n"));
   await chmod(dest, 0o755);
