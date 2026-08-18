@@ -153,6 +153,21 @@ fn read_clipboard_text(app: tauri::AppHandle) -> String {
     app.clipboard().read_text().unwrap_or_default()
 }
 
+/// Marks a launch that the operating system started at login rather than the
+/// user starting it themselves.
+///
+/// Registered into the autostart entry, so it is present on exactly those
+/// launches and on no others. The name is part of that entry once autostart has
+/// been enabled: renaming it leaves existing installations passing the old flag,
+/// which this build would no longer recognise, and they would go back to opening
+/// a window at login.
+const AUTOSTART_FLAG: &str = "--autostart";
+
+/// Whether this launch came from the autostart entry.
+fn is_autostart(args: &[String]) -> bool {
+    args.iter().any(|a| a == AUTOSTART_FLAG)
+}
+
 // The quick-capture mode from the CLI arguments (--quick-note / --quick-task /
 // -q). A shared parser for the first launch and for arguments forwarded by a
 // second instance through single-instance (from WM binds on Wayland).
@@ -350,9 +365,18 @@ pub fn run() {
                 )
                 .plugin(tauri_plugin_opener::init())
                 .plugin(tauri_plugin_notification::init())
+                // The flag is what makes a login launch distinguishable from one
+                // the user asked for: it is written into the autostart entry and
+                // is therefore absent when the app is started by hand. Starting
+                // at login should put the app in the tray, not throw a window
+                // over whatever the user is doing.
+                //
+                // A bare flag is safe on a Windows command line — no spaces, no
+                // backslashes, nothing for an argument parser to split (unlike
+                // the model path in v0.10.25).
                 .plugin(tauri_plugin_autostart::init(
                     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                    None,
+                    Some(vec![AUTOSTART_FLAG]),
                 ))
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())
                 .plugin(tauri_plugin_shell::init())
@@ -651,6 +675,20 @@ pub fn run() {
                             let _ = main_win.hide();
                         }
                         show_quick_capture(&app.app_handle(), mode);
+                    } else if is_autostart(&args) {
+                        // Started at login: go straight to the tray. The window is
+                        // created by the config as visible, so it has to be hidden
+                        // rather than never shown — `visible: false` in the config
+                        // is not an option, because a launch the user asked for
+                        // must still open a window.
+                        //
+                        // Nothing is lost by hiding: the tray icon's left click and
+                        // its "Открыть" item both show this window, and closing it
+                        // has always hidden rather than quit, so a hidden main
+                        // window is a state the app already lives in.
+                        if let Some(main_win) = app.get_webview_window("main") {
+                            let _ = main_win.hide();
+                        }
                     }
 
                     // Global hotkey registration moved below, past the DB pool's
@@ -829,7 +867,7 @@ pub fn run() {
 }
 #[cfg(test)]
 mod tests {
-    use super::{normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins};
+    use super::{is_autostart, normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins};
     use chrono::{TimeZone, Utc};
 
     fn now() -> chrono::DateTime<Utc> {
@@ -900,6 +938,53 @@ mod tests {
             src.contains(r#".with_denylist(&["quick-task"])"#),
             "окно быстрого ввода не исключено — его положение начнёт сохраняться, \
              и всплывашка перестанет появляться по центру"
+        );
+    }
+
+    #[test]
+    fn autostart_is_recognised_only_by_its_own_flag() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_autostart(&args(&["kriptag", "--autostart"])));
+        // A launch the user asked for must still open a window.
+        assert!(!is_autostart(&args(&["kriptag"])));
+        assert!(!is_autostart(&args(&["kriptag", "--quick-note"])));
+        // Not a prefix match: an unrelated flag that merely starts the same way
+        // must not put the app in the tray.
+        assert!(!is_autostart(&args(&["kriptag", "--autostart-disable"])));
+    }
+
+    #[test]
+    fn the_autostart_entry_carries_the_flag_the_app_looks_for() {
+        // Two halves that must agree: the plugin writes this flag into the
+        // autostart entry, and the startup code decides by it. A literal in one
+        // place that drifted from the other would leave the app opening a window
+        // at login again, silently and only on the user's machine.
+        let src = production_src();
+        assert!(
+            src.contains("Some(vec![AUTOSTART_FLAG])"),
+            "флаг автозапуска не передаётся плагину — запись автозапуска не будет \
+             его содержать, и вход в систему снова начнётся с открытого окна"
+        );
+        assert!(
+            src.contains("fn is_autostart"),
+            "некому распознать флаг автозапуска"
+        );
+    }
+
+    #[test]
+    fn an_autostart_launch_hides_the_main_window() {
+        // The window is created visible by tauri.conf.json, so starting in the
+        // tray means hiding it. `visible: false` in the config is not the
+        // alternative: a launch the user asked for must still open a window.
+        let src = production_src();
+        let arm = src
+            .split("else if is_autostart(&args)")
+            .nth(1)
+            .expect("не найдена ветка автозапуска");
+        assert!(
+            arm.contains("main_win.hide()"),
+            "при автозапуске главное окно не прячется — приложение откроется \
+             поверх того, чем пользователь занят при входе в систему"
         );
     }
 
