@@ -63,6 +63,18 @@ tauri-plugin-window-state = "2.4.1"
 # but ignores them entirely on desktop (verified against 2.3.3, desktop.rs::show()
 # passes only title/body/icon/sound into notify_rust). The lower layer does support
 # the protocol, so on Linux we call it directly; see notifier/actions.rs.
+# System idle on Windows: GetLastInputInfo answers "when did input last reach
+# ANY window of the session", which is what separates working elsewhere from
+# having left the desk (see monitor::windows_idle). Version 0.61 on purpose —
+# already in the graph via tauri, and windows-sys is flat FFI bindings with no
+# traits, so a second copy would not repeat the windows-core clash noted above.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4"
 # Wayland is a Linux display protocol, and these crates are written against it:
@@ -71,3 +83,8 @@ notify-rust = "4"
 # is compiled. Used by monitor::wayland_idle, which is gated the same way.
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+# System idle on X11 via MIT-SCREEN-SAVER (monitor::x11_idle). x11rb rather than
+# x11-dl: pure Rust, no dlopen of libXss at run time, and already in the graph
+# via winit. The extension is optional and really is absent sometimes — verified
+# on Xwayland — so the module checks for it instead of trusting the reply.
+x11rb = { version = "0.13", features = ["screensaver"] }

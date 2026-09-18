@@ -729,15 +729,50 @@ pub fn run() {
             let tracker = Arc::new(monitor::activity::ActivityTracker::new());
             app.manage(tracker.clone());
 
-            // Extended tracking: system idle/resume from the compositor. Where it
-            // is unsupported (X11, an older compositor) we use the basic mode.
+            // Extended tracking: a SYSTEM idle source, i.e. one that still hears
+            // the user while they work in another application. Without it
+            // last_input only moves when our own window sees input, and a long
+            // stretch of work elsewhere is indistinguishable from an absence —
+            // the false "you were away for 360 minutes" of v0.10.29. Which source
+            // exists is per-platform; whether one exists at all is what
+            // ExtendedTracking carries and what gates the return notification.
+            //
+            // Each branch must derive the flag from a real probe, never a
+            // literal true: a source that is compiled in but unavailable at run
+            // time (X11, an older compositor, a session with no input desktop)
+            // has to report false. The name of the source for the log rides
+            // along, so the log cannot claim ext-idle-notify on Windows.
+            // Linux is two display protocols, decided at run time, so the probe
+            // picks rather than the build: Wayland first (it is what
+            // WAYLAND_DISPLAY announces), then X11. A Wayland session also
+            // carries Xwayland, where MIT-SCREEN-SAVER is absent — verified — so
+            // the order matters: asking X11 first would get a useless answer on
+            // the very sessions where the native protocol works.
             #[cfg(target_os = "linux")]
-            let extended = is_wayland() && monitor::wayland_idle::start(tracker.clone());
-            // Elsewhere there is no compositor to ask, so tracking stays basic.
-            #[cfg(not(target_os = "linux"))]
-            let extended = false;
+            let (extended, source) = if is_wayland() && monitor::wayland_idle::start(tracker.clone()) {
+                (true, "ext-idle-notify")
+            } else if monitor::x11_idle::start(tracker.clone()) {
+                (true, "MIT-SCREEN-SAVER")
+            } else {
+                (false, "")
+            };
+            #[cfg(target_os = "windows")]
+            let (extended, source) = (
+                monitor::windows_idle::start(tracker.clone()),
+                "GetLastInputInfo",
+            );
+            // No system source implemented here (macOS); tracking stays basic.
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let (extended, source) = (false, "");
             app.manage(ExtendedTracking(extended));
-            eprintln!("[monitor] режим трекинга: {}", if extended { "расширенный (ext-idle-notify)" } else { "базовый (окно в фокусе)" });
+            eprintln!(
+                "[monitor] режим трекинга: {}",
+                if extended {
+                    format!("расширенный ({source})")
+                } else {
+                    "базовый (окно в фокусе)".to_string()
+                }
+            );
 
             // Per-app tracking via capability detection; with no provider the app column stays empty.
             let window_provider = monitor::window::detect_provider();
@@ -818,6 +853,7 @@ pub fn run() {
                 settings.log_interval_secs,
                 work_mode.clone(),
                 window_provider,
+                extended,
             );
 
             notifier::scheduler::start_scheduler(app.app_handle().clone(), pool.clone(), work_mode.clone());
@@ -882,6 +918,99 @@ mod tests {
     fn production_src() -> &'static str {
         const SRC: &str = include_str!("lib.rs");
         SRC.split(concat!("#[cfg(", "test)]")).next().unwrap_or("")
+    }
+
+    // The activity loop must be told whether a SYSTEM idle source exists, and
+    // `extended` is the only value in the app that knows. Hardcoding true here
+    // would restore the false "you were away for 360 minutes" on every platform
+    // without ext-idle-notify-v1 (Windows and macOS have none at all); hardcoding
+    // false would silence the notification even where it is earned.
+    //
+    // A positive check, not "does not contain false": a literal is trivially
+    // hoisted into a variable two lines up, and the negative form would pass.
+    #[test]
+    fn the_activity_loop_is_told_what_the_tracking_mode_really_is() {
+        let src = production_src();
+        let call = src
+            .split("start_activity_loop(")
+            .nth(1)
+            .expect("вызов start_activity_loop не найден");
+        let args = call.split(");").next().expect("у вызова нет конца");
+
+        let last = args
+            .trim_end()
+            .trim_end_matches(',')
+            .rsplit(',')
+            .next()
+            .expect("у вызова нет аргументов")
+            .trim();
+
+        assert_eq!(
+            last, "extended",
+            "последним аргументом должен идти `extended` — тот самый флаг, что \
+             уходит в ExtendedTracking и печатается в лог как «базовый (окно в \
+             фокусе)». Получено `{last}`: если это константа, приложение снова \
+             начнёт утверждать «вы отсутствовали N мин», измерив на самом деле \
+             фокус своего окна."
+        );
+
+        // Checking the NAME is not enough: `let extended = true;` right above the
+        // call satisfies it while restoring the bug. Checking the SHAPE of the
+        // declaration is not enough either — that guard has now been rewritten
+        // three times (v0.10.29 tuple, v0.10.30 three branches, v0.10.31
+        // if/else-if) because the shape keeps changing legitimately, and each
+        // rewrite is a chance for the bypass to slip back in.
+        //
+        // So the invariant is stated without reference to shape: every source
+        // NAMED in the log must be paired with a real probe of that source, and
+        // nothing may declare `extended` outside the block that does the pairing.
+        let block = src
+            .split("app.manage(ExtendedTracking(extended));")
+            .next()
+            .expect("объявление ExtendedTracking не найдено");
+        let block = &block[block.rfind("let tracker").unwrap_or(0)..];
+
+        for (name, probe) in [
+            ("ext-idle-notify", "wayland_idle::start"),
+            ("MIT-SCREEN-SAVER", "x11_idle::start"),
+            ("GetLastInputInfo", "windows_idle::start"),
+        ] {
+            if !block.contains(name) {
+                continue; // that platform's branch is not compiled in this file
+            }
+            assert!(
+                block.contains(probe),
+                "в лог попадает источник «{name}», но рядом нет вызова `{probe}` \
+                 — значит имя печатается без опроса, и «расширенный режим» \
+                 объявляется там, где ничего не измеряется."
+            );
+        }
+
+        // Nothing may declare the flag outside those branches: `let extended =`
+        // anywhere shadows the probed value, which is the bypass that slipped
+        // past three successive versions of this guard.
+        assert_eq!(
+            src.matches("let extended").count(),
+            0,
+            "найдено объявление вида `let extended ...`: оно затеняет флаг, \
+             полученный опросом, и результат опроса перестаёт на что-либо \
+             влиять. Флаг объявляется только вместе с именем источника."
+        );
+
+        // And the no-source case must stay reachable: a platform with nothing
+        // implemented has to report false rather than claim a source.
+        // Counted, not merely found: the literal appears once per platform that
+        // has no source (the Linux else-branch and the macOS branch), so
+        // `contains` is satisfied by either one alone — break one and the other
+        // still answers. "Exists somewhere" is not "exists in every branch".
+        assert_eq!(
+            block.matches("(false, \"\")").count(),
+            2,
+            "ожидались обе ветки без источника — else внутри Linux (ни Wayland, \
+             ни X11 не ответили) и платформа без реализации. Каждая обязана \
+             сообщать базовый режим, иначе уведомление о возврате вернётся к \
+             измерению фокуса окна (v0.10.29)."
+        );
     }
 
     #[test]

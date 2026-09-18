@@ -64,18 +64,29 @@ impl ActivityTracker {
 pub struct IdleTick {
     pub state: ActivityState,
     pub idle_since: Option<chrono::DateTime<Utc>>,
-    // Some(minutes) when this is an Idle->Active transition worth considering a notification for
+    // Some(minutes) when this is an Idle->Active transition worth considering a
+    // notification for. Always None without a system idle source: see step_idle.
     pub notify_return_mins: Option<i64>,
 }
 
 // The pure logic of one tick: from the previous state and the timing it derives
 // the new state, when idleness began, and whether to notify about the return.
+//
+// `system_idle_known` says whether last_input reflects input to the WHOLE SYSTEM
+// or only to our own window. Without a system source (no ext-idle-notify-v1, and
+// on Windows/macOS there is none at all) working in another application is
+// indistinguishable from having left the desk: the tracker simply stops hearing
+// mousemove/keydown. The state machine still runs — the statistics and the log
+// want it — but a return is not announced, because the only thing that message
+// says is "you were away for N minutes", and that number would be a guess about
+// the user's presence made from the focus of one window.
 pub fn step_idle(
     prev_state: &ActivityState,
     idle_since: Option<chrono::DateTime<Utc>>,
     now: chrono::DateTime<Utc>,
     last_input: chrono::DateTime<Utc>,
     idle_threshold_secs: u64,
+    system_idle_known: bool,
 ) -> IdleTick {
     let elapsed = (now - last_input).num_seconds().max(0) as u64;
     let new_state = if elapsed >= idle_threshold_secs {
@@ -91,8 +102,10 @@ pub fn step_idle(
         new_idle_since = Some(last_input);
     }
     if *prev_state == ActivityState::Idle && new_state == ActivityState::Active {
-        let away = new_idle_since.map(|t| (now - t).num_minutes()).unwrap_or(0);
-        notify_return_mins = Some(away);
+        if system_idle_known {
+            let away = new_idle_since.map(|t| (now - t).num_minutes()).unwrap_or(0);
+            notify_return_mins = Some(away);
+        }
         new_idle_since = None;
     }
 
@@ -107,6 +120,9 @@ pub fn start_activity_loop(
     log_interval_secs: u64,
     work_mode: Arc<Mutex<crate::commands::settings::WorkMode>>,
     window_provider: Option<Arc<dyn super::window::WindowProvider>>,
+    // The same flag that ExtendedTracking carries: true only when a system idle
+    // source keeps last_input fresh while the user works elsewhere.
+    system_idle_known: bool,
 ) {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(log_interval_secs));
@@ -120,7 +136,14 @@ pub fn start_activity_loop(
             let now = Utc::now();
             let last_input = *tracker.last_input.lock().unwrap();
 
-            let step = step_idle(&prev_state, idle_since, now, last_input, idle_threshold_secs);
+            let step = step_idle(
+                &prev_state,
+                idle_since,
+                now,
+                last_input,
+                idle_threshold_secs,
+                system_idle_known,
+            );
             let new_state = step.state.clone();
             idle_since = step.idle_since;
 
@@ -416,10 +439,65 @@ mod tests {
         now - ChronoDuration::seconds(secs_ago)
     }
 
+    // The bug the user hit: signed in, worked for an hour in other applications,
+    // and on touching the window got "you were away for 360 minutes".
+    //
+    // Without a system idle source last_input only moves when OUR window sees
+    // mousemove/keydown (App.svelte). Hidden in the tray since v0.10.27, the app
+    // hears nothing while the user works elsewhere, so the gap measures the focus
+    // of one window and calling it absence is a lie. The state machine may still
+    // run — the statistics want it — but the claim must not be made.
+    #[test]
+    fn a_long_gap_is_not_reported_as_absence_without_a_system_source() {
+        let now = Utc::now();
+        // Six hours since the window was last touched, the user present all along.
+        let idle_since = at(now, 6 * 60 * 60);
+        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, now, 300, false);
+
+        assert_eq!(step.state, ActivityState::Active, "возврат к активности виден");
+        assert_eq!(
+            step.notify_return_mins, None,
+            "в базовом режиме last_input отражает фокус НАШЕГО окна, а не \
+             присутствие: шесть часов работы в других приложениях выглядят так \
+             же, как уход из-за стола. Утверждать «вы отсутствовали 360 мин» \
+             здесь нельзя — это была та самая ошибка у пользователя."
+        );
+        assert_eq!(step.idle_since, None, "состояние всё равно сбрасывается");
+    }
+
+    // The control case: with a system source the same transition MUST report.
+    // Without this pair "never notifies" would look exactly like the fix.
+    #[test]
+    fn the_same_return_is_reported_when_the_system_source_is_present() {
+        let now = Utc::now();
+        let idle_since = at(now, 6 * 60 * 60);
+        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, now, 300, true);
+
+        assert_eq!(
+            step.notify_return_mins,
+            Some(360),
+            "при системном источнике last_input обновляется тикером \
+             wayland_idle, пока пользователь работает где угодно — значит \
+             пробел действительно означает отсутствие, и о нём сообщаем"
+        );
+    }
+
+    // Statistics and the activity log are fed by `state`, and they are honest
+    // about what they measure. Suppressing the STATE as well would silently
+    // rewrite the log into "always active".
+    #[test]
+    fn the_basic_mode_still_tracks_the_state_itself() {
+        let now = Utc::now();
+        let step = step_idle(&ActivityState::Active, None, now, at(now, 400), 300, false);
+        assert_eq!(step.state, ActivityState::Idle, "состояние считается как прежде");
+        assert_eq!(step.idle_since, Some(at(now, 400)), "и момент начала простоя тоже");
+        assert_eq!(step.notify_return_mins, None);
+    }
+
     #[test]
     fn active_stays_active_below_threshold() {
         let now = Utc::now();
-        let step = step_idle(&ActivityState::Active, None, now, at(now, 100), 300);
+        let step = step_idle(&ActivityState::Active, None, now, at(now, 100), 300, true);
         assert_eq!(step.state, ActivityState::Active);
         assert_eq!(step.idle_since, None);
         assert_eq!(step.notify_return_mins, None);
@@ -429,10 +507,10 @@ mod tests {
     fn threshold_is_inclusive_boundary() {
         let now = Utc::now();
         // exactly at the threshold -> Idle (>=)
-        let step = step_idle(&ActivityState::Active, None, now, at(now, 300), 300);
+        let step = step_idle(&ActivityState::Active, None, now, at(now, 300), 300, true);
         assert_eq!(step.state, ActivityState::Idle);
         // one second below the threshold -> still Active
-        let step = step_idle(&ActivityState::Active, None, now, at(now, 299), 300);
+        let step = step_idle(&ActivityState::Active, None, now, at(now, 299), 300, true);
         assert_eq!(step.state, ActivityState::Active);
     }
 
@@ -440,7 +518,7 @@ mod tests {
     fn active_to_idle_records_idle_since_and_does_not_notify() {
         let now = Utc::now();
         let last_input = at(now, 400);
-        let step = step_idle(&ActivityState::Active, None, now, last_input, 300);
+        let step = step_idle(&ActivityState::Active, None, now, last_input, 300, true);
         assert_eq!(step.state, ActivityState::Idle);
         assert_eq!(step.idle_since, Some(last_input));
         assert_eq!(step.notify_return_mins, None);
@@ -450,7 +528,7 @@ mod tests {
     fn idle_stays_idle_keeps_idle_since() {
         let now = Utc::now();
         let idle_since = at(now, 600);
-        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, at(now, 500), 300);
+        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, at(now, 500), 300, true);
         assert_eq!(step.state, ActivityState::Idle);
         assert_eq!(step.idle_since, Some(idle_since));
         assert_eq!(step.notify_return_mins, None);
@@ -461,7 +539,7 @@ mod tests {
         let now = Utc::now();
         // went idle 30 minutes ago and has just returned (last_input = now)
         let idle_since = at(now, 30 * 60);
-        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, now, 300);
+        let step = step_idle(&ActivityState::Idle, Some(idle_since), now, now, 300, true);
         assert_eq!(step.state, ActivityState::Active);
         assert_eq!(step.idle_since, None);
         assert_eq!(step.notify_return_mins, Some(30));
@@ -471,7 +549,7 @@ mod tests {
     fn idle_to_active_without_idle_since_reports_zero() {
         let now = Utc::now();
         // idle_since is unset (an edge case): away = 0, but a notification is still considered
-        let step = step_idle(&ActivityState::Idle, None, now, now, 300);
+        let step = step_idle(&ActivityState::Idle, None, now, now, 300, true);
         assert_eq!(step.notify_return_mins, Some(0));
     }
 
