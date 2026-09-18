@@ -176,12 +176,17 @@
         </label>
       </div>
     {:else if step === 3}
-      <h2>{t("Мониторинг на Wayland")}</h2>
+      <!-- Neither the platform nor the protocol is named here: there are three
+           system sources (see get_tracking_source) and this screen has no way to
+           know which one answered. It used to say "on Wayland ... ext-idle-notify",
+           which became wrong on Windows and X11 (v0.10.30, v0.10.31). The exact
+           source is shown in Settings, where the backend reports it. -->
+      <h2>{t("Мониторинг активности")}</h2>
       <p>
-        {t("Активность отслеживается системно: композитор сам сообщает о простое и возврате (протокол")} <code>ext-idle-notify</code>{t("). Настраивать ничего не нужно, содержимое ввода приложению не видно — только факт активности.")}
+        {t("Активность отслеживается системно: система сама сообщает о простое и возврате. Настраивать ничего не нужно, содержимое ввода приложению не видно — только факт активности.")}
       </p>
       <p class="muted" style="font-size:13px;">
-        {t("Если композитор не поддерживает протокол, трекинг работает только при окне в фокусе. Текущий режим виден в Настройках → Мониторинг.")}
+        {t("Если системный источник недоступен, трекинг работает только при окне в фокусе. Текущий режим и его источник видны в Настройках → Мониторинг.")}
       </p>
     {:else if step === 4}
       <h2>{t("Автозагрузка и хоткеи")}</h2>

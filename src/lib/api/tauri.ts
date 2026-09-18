@@ -121,6 +121,10 @@ export const api = {
   saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
   isWayland: () => invoke<boolean>("is_wayland"),
   getTrackingMode: () => invoke<"extended" | "basic">("get_tracking_mode"),
+  // Which system idle source answered (null in basic mode). Named rather than
+  // assumed: there are three, and the hint used to claim the compositor's on
+  // every platform.
+  getTrackingSource: () => invoke<string | null>("get_tracking_source"),
   getWindowTracking: () => invoke<string | null>("get_window_tracking"),
   exportData: (path: string) => invoke<void>("export", { path }),
   importData: (path: string) => invoke<void>("import", { path }),

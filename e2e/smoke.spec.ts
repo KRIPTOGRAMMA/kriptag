@@ -790,7 +790,9 @@ test("онбординг: страница биндов композитора �
   await page.getByRole("button", { name: "Далее" }).click();
   await page.getByRole("button", { name: "Начать настройку" }).click();
   await page.getByRole("button", { name: "Далее" }).click();
-  await expect(page.getByText("Мониторинг на Wayland")).toBeVisible();
+  // Заголовок шага больше не называет платформу: системных источников три, и
+  // экран не знает, какой ответил (v0.10.34).
+  await expect(page.getByText("Мониторинг активности")).toBeVisible();
   await page.getByRole("button", { name: "Далее" }).click();
   await expect(page.getByText("Автозагрузка и хоткеи")).toBeVisible();
   await page.getByRole("button", { name: "Далее" }).click();

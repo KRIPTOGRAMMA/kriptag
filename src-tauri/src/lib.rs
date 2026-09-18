@@ -38,13 +38,29 @@ fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
 }
 
-// The activity tracking mode: extended means system idle/resume via
-// ext-idle-notify-v1 (Wayland), basic means only input inside the app window.
-pub struct ExtendedTracking(pub bool);
+// The activity tracking mode: extended means a SYSTEM idle source is answering
+// (so working in another application still counts as presence), basic means only
+// input inside our own window is seen.
+//
+// The name of that source travels with the flag. There are three of them now —
+// ext-idle-notify-v1 on Wayland, MIT-SCREEN-SAVER on X11, GetLastInputInfo on
+// Windows — and the Settings hint used to have "from the compositor
+// (ext-idle-notify)" hardcoded, which became untrue on two platforms out of
+// three the moment the other two landed (v0.10.30, v0.10.31). Reporting the name
+// the probe actually chose is what keeps that text honest, the same way the
+// startup log is.
+pub struct ExtendedTracking(pub bool, pub &'static str);
 
 #[tauri::command]
 fn get_tracking_mode(mode: tauri::State<'_, ExtendedTracking>) -> &'static str {
     if mode.0 { "extended" } else { "basic" }
+}
+
+// The system idle source that answered, e.g. "ext-idle-notify". None in basic
+// mode: there is nothing to name.
+#[tauri::command]
+fn get_tracking_source(mode: tauri::State<'_, ExtendedTracking>) -> Option<&'static str> {
+    if mode.0 { Some(mode.1) } else { None }
 }
 
 // The name of the active-window provider, if capability detection found a working one.
@@ -424,6 +440,7 @@ pub fn run() {
                         get_quick_mode,
                         is_wayland,
                         get_tracking_mode,
+                        get_tracking_source,
                         get_window_tracking,
                         commands::monitor::record_input,
                         commands::monitor::get_session_stats,
@@ -764,7 +781,7 @@ pub fn run() {
             // No system source implemented here (macOS); tracking stays basic.
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             let (extended, source) = (false, "");
-            app.manage(ExtendedTracking(extended));
+            app.manage(ExtendedTracking(extended, source));
             eprintln!(
                 "[monitor] режим трекинга: {}",
                 if extended {
@@ -964,8 +981,17 @@ mod tests {
         // So the invariant is stated without reference to shape: every source
         // NAMED in the log must be paired with a real probe of that source, and
         // nothing may declare `extended` outside the block that does the pairing.
+        // The marker must actually be present: `split` on a missing needle
+        // silently returns the WHOLE file, so a renamed call would quietly widen
+        // the block instead of failing. That happened in v0.10.34, when the state
+        // gained a second field and the old marker stopped matching.
+        const MARKER: &str = "app.manage(ExtendedTracking(";
+        assert!(
+            src.contains(MARKER),
+            "маркер `{MARKER}` не найден: страж молча расширился бы на весь файл"
+        );
         let block = src
-            .split("app.manage(ExtendedTracking(extended));")
+            .split(MARKER)
             .next()
             .expect("объявление ExtendedTracking не найдено");
         let block = &block[block.rfind("let tracker").unwrap_or(0)..];

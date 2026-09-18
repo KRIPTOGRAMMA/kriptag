@@ -438,6 +438,8 @@
   }
   let error: string | null = $state(null);
   let trackingMode: "extended" | "basic" | null = $state(null);
+  // The source's own name, so the hint below does not have to guess it.
+  let trackingSource: string | null = $state(null);
   let windowTracking: string | null = $state(null);
   let modelPath: string | null = $state(null);
   let whisperPath: string | null = $state(null);
@@ -622,6 +624,7 @@
     // The list of global actions comes from the backend, which is what registers them.
     globalActions = await api.listGlobalActions().catch(() => []);
     trackingMode = await api.getTrackingMode().catch(() => null);
+    trackingSource = await api.getTrackingSource().catch(() => null);
     windowTracking = await api.getWindowTracking().catch(() => null);
     // The real path from the backend rather than a string assembled on the
     // frontend: the directory depends on the OS (app_data_dir) and on the
@@ -1393,8 +1396,12 @@
     <p class="hint">{t("Применяется после перезапуска приложения.")}</p>
     {#if trackingMode}
       <p class="hint">
+        <!-- The source is named by the backend, not spelled out here: there are
+             three of them (ext-idle-notify on Wayland, MIT-SCREEN-SAVER on X11,
+             GetLastInputInfo on Windows) and this text used to hardcode the
+             first, which made it wrong on the other two. -->
         {t("Режим трекинга")}: {trackingMode === "extended"
-          ? t("расширенный — системный простой/возврат от композитора (ext-idle-notify)")
+          ? `${t("расширенный — системный простой/возврат")}${trackingSource ? ` (${trackingSource})` : ""}`
           : t("базовый — только ввод в окне приложения")}
         {windowTracking ? ` · ${t("приложения")}: ${windowTracking}` : ""}
       </p>

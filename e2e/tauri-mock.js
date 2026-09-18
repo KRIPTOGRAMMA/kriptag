@@ -160,6 +160,9 @@
     // единственный шаг онбординга, которого на не-Wayland быть не должно.
     is_wayland: () => window.__forceWayland === true,
     get_tracking_mode: () => "basic",
+    // null, consistently with "basic": in basic mode there is no system source
+    // to name.
+    get_tracking_source: () => null,
     get_window_tracking: () => db.windowTracking ?? null,
     record_input: () => {},
     open_quick_capture: ({ mode }) => {

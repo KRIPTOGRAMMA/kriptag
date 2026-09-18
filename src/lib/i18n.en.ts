@@ -485,13 +485,14 @@ export const EN: Record<string, string> = {
   "Облачный API": "Cloud API",
   "OpenAI или Anthropic — API-ключ вводится в Настройках":
     "OpenAI or Anthropic — the API key is entered in Settings",
-  "Мониторинг на Wayland": "Monitoring on Wayland",
-  "Активность отслеживается системно: композитор сам сообщает о простое и возврате (протокол":
-    "Activity is tracked at the system level: the compositor itself reports idle and return (the",
-  "). Настраивать ничего не нужно, содержимое ввода приложению не видно — только факт активности.":
-    " protocol). Nothing to configure, and the app never sees what you type — only that you were active.",
-  "Если композитор не поддерживает протокол, трекинг работает только при окне в фокусе. Текущий режим виден в Настройках → Мониторинг.":
-    "If the compositor doesn’t support the protocol, tracking only works while the window is focused. The current mode is shown in Settings → Monitoring.",
+  // "Мониторинг активности" is already declared further down (the help topic
+  // uses the same words), so it is not repeated here.
+  // One key rather than two around a <code> element: the source's name is no
+  // longer part of the sentence, so the phrase need not be split.
+  "Активность отслеживается системно: система сама сообщает о простое и возврате. Настраивать ничего не нужно, содержимое ввода приложению не видно — только факт активности.":
+    "Activity is tracked at the system level: the system itself reports idle and return. Nothing to configure, and the app never sees what you type — only that you were active.",
+  "Если системный источник недоступен, трекинг работает только при окне в фокусе. Текущий режим и его источник видны в Настройках → Мониторинг.":
+    "If no system source is available, tracking only works while the window is focused. The current mode and its source are shown in Settings → Monitoring.",
   "Запускать Kriptag при входе в систему": "Launch Kriptag at login",
   "Быстрая задача из любого места:": "Quick task from anywhere:",
   "На Hyprland/Sway глобальные хоткеи перехватывает композитор — добавь бинд, запускающий":
@@ -730,7 +731,8 @@ export const EN: Record<string, string> = {
   "Рабочий блок (мин)": "Work block (min)",
   "Разархивировать": "Unarchive",
   "раз в {n} {unit}": "every {n} {unit}",
-  "расширенный — системный простой/возврат от композитора (ext-idle-notify)": "extended — system idle/return from the compositor (ext-idle-notify)",
+  // The source is appended by the caller, so the phrase must not name one.
+  "расширенный — системный простой/возврат": "extended — system idle/return",
   "Режим трекинга": "Tracking mode",
   "Сб": "Sat",
   "Сбросит флаг onboarding_complete и покажет онбординг заново": "Resets the onboarding_complete flag and shows onboarding again",
@@ -813,7 +815,7 @@ export const EN: Record<string, string> = {
   "Повторы": "Recurrence",
   "Повторяющаяся задача не закрывается: по «✓» она уезжает на следующий срок и возвращается в Todo, а её чеклист сбрасывается — это план следующего прогона.": "A recurring task is never closed: “✓” moves it to the next due date and back to Todo, and its checklist resets — it is the plan for the next run, not a report on the last one.",
   "Умные списки": "Smart lists",
-  "Сохранённые фильтры в левой панели. Встроенные — на сегодня, просроченные, без срока; свои создаются из текущих фильтров.": "Saved filters in the left panel. The built-in ones are due today, overdue and no due date; your own are created from the current filters.",
+  "Сохранённые фильтры в левой панели. Встроенные — просроченные, на этой неделе, заблокированные: их условие нельзя выразить сохранённым фильтром. Свои создаются из текущих фильтров — категория, приоритет, тег, наличие срока.": "Saved filters in the left panel. The built-in ones are overdue, this week and blocked: their condition cannot be expressed as a saved filter. Your own are created from the current filters — category, priority, tag, whether a deadline is set.",
   "Мультивыбор": "Multi-select",
   "Ctrl+клик по строкам добавляет к выделению, Shift+клик берёт диапазон. Массовые действия появляются полосой сверху.": "Ctrl+click adds rows to the selection, Shift+click takes a range. Bulk actions appear as a bar on top.",
   "История и Корзина": "History and Trash",
