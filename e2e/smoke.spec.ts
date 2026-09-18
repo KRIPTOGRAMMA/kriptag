@@ -984,6 +984,34 @@ test("заметка из буфера: окно открывается пред
   expect(notes).toContain("Идея для доклада (правка)");
 });
 
+// Окно объявлено decorations: false, как и главное, поэтому системной рамки —
+// а с ней крестика и возможности таскать окно — нет. Главное окно возвращает то
+// и другое в WindowControls, быстрое не возвращало ничего: выйти можно было
+// только с клавиатуры. Кнопка есть во всех трёх режимах окна, а не только там,
+// где нарисована шапка.
+test("быстрое окно: крестик закрытия виден и рисуется", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [] });
+  await withMock(page);
+  await page.goto("/quick-task.html");
+
+  const close = page.locator(".quick-close");
+  await expect(close).toBeVisible();
+  // Кнопка обязана что-то рисовать: Icon отдаёт пустой path для неизвестного
+  // имени, и тогда крестик кликабелен, но невидим (страж в iconNames.test.ts).
+  await expect(close.locator("svg path")).toHaveAttribute("d", /\S/);
+});
+
+// Крестик нужен во всех режимах окна, а не только там, где есть шапка: в
+// закреплённом слоте своя разметка, и кнопка вынесена из потока именно поэтому.
+test("быстрое окно: крестик закрытия есть и в закреплённом слоте", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "pinned" });
+  await withMock(page);
+  await page.goto("/quick-task.html");
+
+  await expect(page.locator(".pin-empty-title")).toBeVisible();
+  await expect(page.locator(".quick-close")).toBeVisible();
+});
+
 // Скопированная ссылка — самый частый случай этого хоткея, и голый URL в
 // заголовке нечитаем в списке заметок. Такой буфер целиком уходит в тело.
 test("заметка из буфера: скопированная ссылка попадает в тело, заголовок пуст", async ({ page }) => {
@@ -2727,14 +2755,22 @@ test("помодоро: ▶ на виджете при off запускает р
   await withMock(page);
   await page.goto("/");
 
-  const widget = page.locator(".pomo");
-  await expect(widget.getByTitle("Начать помидор")).toBeVisible();
+  // Idle and running are two different elements: idle is the start button
+  // itself (.pomo-start), running is the widget card (.pomo). Wrapping the idle
+  // state in a card made the card look like the button while the real control
+  // was a small transparent icon inside it — v0.10.32.
+  const start = page.locator(".pomo-start");
+  await expect(start).toBeVisible();
+  await expect(start).toHaveText(/Помидор/);
 
-  await widget.getByTitle("Начать помидор").click();
+  await start.click();
+
+  const widget = page.locator(".pomo");
   await expect(widget.locator(".pomo-label")).toHaveText("Фокус");
+  await expect(start).toHaveCount(0);
 
   await widget.getByTitle("Остановить").click();
-  await expect(widget.getByTitle("Начать помидор")).toBeVisible();
+  await expect(start).toBeVisible();
 });
 
 test("дашборд: карточка «Помодоро» показывает статистику и стрики", async ({ page }) => {

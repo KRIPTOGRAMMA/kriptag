@@ -156,9 +156,9 @@
     </section>
 
     <section class="today-col today-side-col">
-      <div class="side-card">
-        <PomodoroWidget />
-      </div>
+      <!-- No .side-card here: PomodoroWidget brings its own .card, and nesting
+           the two drew a border inside a border with doubled padding. -->
+      <PomodoroWidget />
 
       <div class="side-card">
         <h3 class="col-title"><Icon name="flag" size={13} /> {tr("Дедлайны сегодня и просрочка")}</h3>
@@ -278,6 +278,16 @@
   .today-side-col {
     width: 280px;
     flex-shrink: 0;
+  }
+
+  /* The pomodoro start button is taller here than in the sidebar: this column is
+     280px wide and its neighbours are .side-card blocks with 10px/12px padding,
+     so the sidebar's compact height read as undersized next to them. Scoped to
+     Today via :global because the button lives inside PomodoroWidget, which is
+     shared with the sidebar and must stay compact there. */
+  .today-side-col :global(.pomo-start) {
+    padding-top: 7px;
+    padding-bottom: 7px;
   }
 
   .side-card {

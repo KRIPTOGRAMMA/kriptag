@@ -8,6 +8,7 @@
   import { splitSubtaskLines, SUBTASK_PREFIX } from "../composer";
   import { parseChecklist, formatChecklist } from "../checklistText";
   import ChecklistEditor from "./ChecklistEditor.svelte";
+  import Icon from "./Icon.svelte";
   import Select from "./Select.svelte";
   import VoiceButton from "./VoiceButton.svelte";
   import { voice } from "../voice.svelte";
@@ -410,11 +411,42 @@
     });
     return next;
   }
+
+  // The window is declared decorations: false, like the main one, so WebKitGTK
+  // draws no title bar — and with it go the system close button and the ability
+  // to drag the window. The main window restores both in WindowControls; this one
+  // restored neither, leaving Escape as the only way out and no way at all to
+  // move it. That is what is fixed here.
+  //
+  // startDragging on mousedown rather than data-tauri-drag-region, for the reason
+  // WindowControls already records: the attribute fires for clicks on nested
+  // elements too, so a click on a tab or a button would become a micro-drag.
+  async function startDrag(e: MouseEvent) {
+    // Primary button only: a right click belongs to the window manager.
+    if (e.button !== 0) return;
+    // Only the chrome drags. Anything the user can type in, click or select keeps
+    // its own behaviour — dragging from inside a textarea would make selecting
+    // text impossible.
+    const el = e.target as HTMLElement | null;
+    if (el?.closest("input, textarea, button, select, a, [role=button], .subs")) return;
+    try {
+      await getCurrentWindow().startDragging();
+    } catch {
+      // Dragging is not worth breaking the window over.
+    }
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="container">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="container" onmousedown={startDrag}>
+  <!-- Escape still does everything this does, including flushing a deferred
+       checklist edit — cancel() is the same path. The button exists because with
+       no system title bar there was no way to close the window with the mouse. -->
+  <button class="quick-close btn-icon" title={t("Закрыть")} onclick={cancel}>
+    <Icon name="x" />
+  </button>
   {#if mode !== "pinned"}
     <!-- Tabs as plain text rather than a .seg control. The window has exactly one
          job, and a bordered segmented control at the top competed with the field
@@ -569,6 +601,7 @@
 
 <style>
   .container {
+    position: relative;
     padding: 14px 16px 0;
     display: flex;
     flex-direction: column;
@@ -618,6 +651,21 @@
     border-radius: 1px;
     background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
   }
+  /* Top-right corner, above the content and outside the flow: the window has
+     three different layouts (task, note, pinned) and only one of them has a
+     header row to put this in. position: absolute keeps it in the same place in
+     all three. */
+  .quick-close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    color: var(--text-secondary);
+  }
+  .quick-close:hover {
+    color: var(--text-primary);
+  }
+
   .error {
     font-size: 12px;
     color: var(--danger);

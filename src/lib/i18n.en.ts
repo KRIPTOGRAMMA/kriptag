@@ -408,6 +408,7 @@ export const EN: Record<string, string> = {
 
   // --- Pomodoro and tracking ---
   "Начать помидор": "Start pomodoro",
+  "Помидор": "Pomodoro",
   "Пропустить фазу": "Skip phase",
   "Остановить трекинг": "Stop tracking",
   "Остановить": "Stop",

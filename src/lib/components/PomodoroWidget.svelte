@@ -66,9 +66,13 @@
 </script>
 
 {#if phase === "off"}
-  <div class="pomo card">
-    <button class="btn-icon" title={t("Начать помидор")} onclick={start}><Icon name="play" /> <Icon name="timer" /></button>
-  </div>
+  <!-- Idle: the button IS the widget. Wrapping it in a .card put a bordered,
+       filled rectangle around a transparent .btn-icon, so the card read as the
+       button and the real control was the small invisible thing inside it —
+       clicking the obvious target did nothing. -->
+  <button class="pomo-start btn btn-sm" title={t("Начать помидор")} onclick={start}>
+    <Icon name="play" /> <span>{t("Помидор")}</span>
+  </button>
 {:else}
   <div class="pomo card">
     <span class="pomo-label"><Icon name={phaseIcon} /> {phaseLabel}</span>
@@ -110,5 +114,17 @@
     display: flex;
     gap: 4px;
     margin-top: 2px;
+  }
+
+  /* Same box as the running widget occupies, so starting a pomodoro does not
+     make the sidebar jump. The margin matches .pomo above. */
+  .pomo-start {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: calc(100% - 16px);
+    margin: 0 8px 8px;
+    font-size: 12px;
   }
 </style>
