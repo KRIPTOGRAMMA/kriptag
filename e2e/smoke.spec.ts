@@ -960,7 +960,7 @@ test("завершение задачи проставляет done всем е�
 });
 
 // v0.9.26: заметка из буфера обмена (Ctrl+Shift+B). Отдельная точка входа
-// quick-task.html — то же окно быстрого ввода, что и для Ctrl+Shift+N/M.
+// quick-window.html — то же окно быстрого ввода, что и для Ctrl+Shift+N/M.
 test("заметка из буфера: окно открывается предзаполненным и сохраняет заметку", async ({ page }) => {
   // Сид ДО tauri-mock.js: мок читает localStorage один раз при загрузке,
   // поэтому init-скрипт с состоянием обязан быть зарегистрирован раньше.
@@ -969,7 +969,7 @@ test("заметка из буфера: окно открывается пред
     (window as any).__mockClipboard = "Идея для доклада\nразобрать примеры\nи выводы";
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   // первая строка — заголовок, остальное — тело
   await expect(page.locator("input")).toHaveValue("Идея для доклада");
@@ -994,7 +994,7 @@ test("заметка из буфера: окно открывается пред
 test("быстрое окно: крестик закрытия виден и рисуется", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [] });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const close = page.locator(".quick-close");
   await expect(close).toBeVisible();
@@ -1008,7 +1008,7 @@ test("быстрое окно: крестик закрытия виден и р�
 test("быстрое окно: крестик закрытия есть и в закреплённом слоте", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "pinned" });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator(".pin-empty-title")).toBeVisible();
   await expect(page.locator(".quick-close")).toBeVisible();
@@ -1022,7 +1022,7 @@ test("заметка из буфера: скопированная ссылка 
     (window as any).__mockClipboard = "https://example.com/article?id=42";
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator("input")).toHaveValue("");
   await expect(page.locator("textarea")).toHaveValue("https://example.com/article?id=42");
@@ -1043,7 +1043,7 @@ test("заметка из буфера: пустой буфер даёт обы�
     (window as any).__mockClipboard = "   \n\n  ";
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator("input")).toHaveValue("");
   await expect(page.locator("textarea")).toHaveValue("");
@@ -1063,7 +1063,7 @@ test("заметка из буфера: пустой буфер даёт обы�
 test("быстрый ввод: задача создаётся с приоритетом и категорией из подвала", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   // Каретка сразу в заголовке: окно открывают, чтобы печатать, а не выбирать.
   await expect(page.locator(".lead-input")).toBeFocused();
@@ -1092,7 +1092,7 @@ test("быстрый ввод: задача создаётся с приорит
 test("быстрый ввод: Shift+Enter из заголовка уводит в описание и заводит подзадачу", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await page.locator(".lead-input").fill("собрать шкаф");
   await page.keyboard.press("Shift+Enter");
@@ -1119,7 +1119,7 @@ test("быстрый ввод: Shift+Enter из заголовка уводит 
 test("быстрый ввод: обычные строки остаются описанием, ☐-строки — подзадачами", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "task" });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await page.locator(".lead-input").fill("поездка");
   await page.locator(".desc-input").click();
@@ -5797,7 +5797,7 @@ test("канбан: своя колонка добавляется на доск
 
 // v0.9.33: быстрый слот (Ctrl+Shift+J) — одна закреплённая задача или заметка,
 // которую хоткей открывает сразу на правку текста. В отличие от остальных
-// режимов quick-task.html этот ничего не создаёт, а меняет существующее.
+// режимов quick-window.html этот ничего не создаёт, а меняет существующее.
 test("быстрый слот: открывает закреплённую задачу и сохраняет правку текста", async ({ page }) => {
   await seedDb(page, {
     tasks: [{
@@ -5810,7 +5810,7 @@ test("быстрый слот: открывает закреплённую за�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   // видно, что правится именно задача, а не создаётся новая
   await expect(page.locator(".pin-badge")).toHaveText("⚡ Задача");
@@ -5833,7 +5833,7 @@ test("быстрый слот: открывает закреплённую за�
 test("быстрый слот: пустой слот объясняет, как закрепить, вместо пустой формы", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "pinned" });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator(".pin-empty-title")).toBeVisible();
   await expect(page.locator(".pin-empty-hint")).toContainText("Закрепите задачу или заметку");
@@ -5858,7 +5858,7 @@ test("быстрый слот: задача из Корзины читается
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator(".pin-empty-title")).toBeVisible();
   await expect(page.locator(".pin-title")).toHaveCount(0);
@@ -5915,7 +5915,7 @@ test("быстрый слот: чек-лист задачи виден, отме
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   // v0.9.45: разметка скрыта, отметка — чекбокс внутри строки
   const boxes = page.locator(".checklist-editor .cm-sub-checkbox");
@@ -5948,7 +5948,7 @@ test("быстрый слот: подзадача добавляется стр�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   // v0.9.45: добавление и удаление — это правка текста. Enter внутри редактора
   // добавляет строку и НЕ сохраняет слот целиком (иначе окно бы закрылось).
@@ -5986,7 +5986,7 @@ test("быстрый слот: Escape сразу после правки чек-
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await page.locator(".checklist-editor").click();
   await page.keyboard.press("ControlOrMeta+a");
@@ -6014,7 +6014,7 @@ test("быстрый слот: у закреплённой заметки чек
     quickMode: "pinned", pinnedKind: "note", pinnedId: "n1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   await expect(page.locator(".pin-badge")).toHaveText("⚡ Заметка");
   await expect(page.locator(".subs")).toHaveCount(0);
@@ -6441,7 +6441,7 @@ test("чек-лист: подзадача стирается текстом, п�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const editor = page.locator(".checklist-editor");
   await expect(editor.locator(".cm-sub-checkbox")).toHaveCount(2);
@@ -6489,7 +6489,7 @@ test("чек-лист: пустые строки исчезают при ухо�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const editor = page.locator(".checklist-editor");
   await editor.click();
@@ -6534,7 +6534,7 @@ test("чек-лист: Enter на пустой строке даёт подза�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const editor = page.locator(".checklist-editor");
   await editor.click();
@@ -6578,7 +6578,7 @@ test("чек-лист: Ctrl+Enter сохраняет слот, а не вста�
     quickMode: "pinned", pinnedKind: "task", pinnedId: "t1",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const editor = page.locator(".checklist-editor");
   await editor.click();
@@ -7009,7 +7009,7 @@ test("голос: диктовка в быстрый слот вставляет
     voiceText: "мысль на бегу",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const field = page.locator("textarea");
   await field.fill("было: ");
@@ -7076,7 +7076,7 @@ test("голос: хоткей в быстром слоте вставляет �
     voiceText: "голосом",
   });
   await withMock(page);
-  await page.goto("/quick-task.html");
+  await page.goto("/quick-window.html");
 
   const field = page.locator("textarea");
   await field.fill("было:");

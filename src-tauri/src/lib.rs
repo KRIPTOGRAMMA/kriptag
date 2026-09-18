@@ -148,8 +148,8 @@ fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
     if let Some(state) = app.try_state::<QuickMode>() {
         *state.lock().unwrap() = mode.to_string();
     }
-    let _ = app.emit_to("quick-task", "quick-mode", mode);
-    if let Some(w) = app.get_webview_window("quick-task") {
+    let _ = app.emit_to(QUICK_WINDOW_LABEL, "quick-mode", mode);
+    if let Some(w) = app.get_webview_window(QUICK_WINDOW_LABEL) {
         let _ = w.show();
         let _ = w.set_focus();
     }
@@ -177,6 +177,20 @@ fn read_clipboard_text(app: tauri::AppHandle) -> String {
 /// been enabled: renaming it leaves existing installations passing the old flag,
 /// which this build would no longer recognise, and they would go back to opening
 /// a window at login.
+// The quick-capture window's label, as declared in tauri.conf.json. A constant
+// rather than a literal in five places: the label is how the window is looked up
+// (get_webview_window), addressed (emit_to) and excluded from geometry
+// restoration, so a typo in any one of them fails silently — the lookup simply
+// returns None.
+//
+// Named "quick-window" since v0.10.35. It was "quick-task" while the window only
+// created tasks; it has since grown notes, clipboard capture and editing the
+// pinned slot, so the old name described a third of what it does. The CLI flags
+// (--quick-task and friends) deliberately keep their names: the app hands users
+// ready-made compositor binds containing them (see Onboarding), so those are a
+// public interface, not an internal one.
+const QUICK_WINDOW_LABEL: &str = "quick-window";
+
 const AUTOSTART_FLAG: &str = "--autostart";
 
 /// Whether this launch came from the autostart entry.
@@ -376,7 +390,7 @@ pub fn run() {
                 .plugin(
                     tauri_plugin_window_state::Builder::new()
                         .with_state_flags(WINDOW_STATE_FLAGS)
-                        .with_denylist(&["quick-task"])
+                        .with_denylist(&[QUICK_WINDOW_LABEL])
                         .build(),
                 )
                 .plugin(tauri_plugin_opener::init())
@@ -675,7 +689,7 @@ pub fn run() {
                     }
 
                     // Hide the quick-task window instead of closing it (so the hotkeys keep working)
-                    if let Some(quick_win) = app.get_webview_window("quick-task") {
+                    if let Some(quick_win) = app.get_webview_window(QUICK_WINDOW_LABEL) {
                         let win = quick_win.clone();
                         quick_win.on_window_event(move |event| {
                             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1090,7 +1104,7 @@ mod tests {
         // Quick capture is a popup: fixed size, centered, hidden until asked for.
         // Restoring its geometry would put it wherever it was last used.
         assert!(
-            src.contains(r#".with_denylist(&["quick-task"])"#),
+            src.contains(r#".with_denylist(&[QUICK_WINDOW_LABEL])"#),
             "окно быстрого ввода не исключено — его положение начнёт сохраняться, \
              и всплывашка перестанет появляться по центру"
         );

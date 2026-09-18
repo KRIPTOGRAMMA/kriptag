@@ -10,7 +10,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: "index.html",
-        quickTask: "quick-task.html",
+        quickWindow: "quick-window.html",
       },
       output: {
         manualChunks: {
