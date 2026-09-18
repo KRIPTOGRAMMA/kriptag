@@ -17,6 +17,7 @@ pub fn start_scheduler(app: tauri::AppHandle, pool: SqlitePool, work_mode: Arc<M
             check_goals(&app, &pool, muted).await;
             check_morning_digest(&app, &pool, muted).await;
             check_app_limits(&app, &pool, muted).await;
+            check_offtrack(&app, &pool, muted).await;
             check_note_reminders(&app, &pool, muted).await;
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
@@ -475,6 +476,104 @@ pub fn limits_due(
     out
 }
 
+// "You meant to be doing X, and you are in something else."
+//
+// Every other notification here fires on the clock (a deadline at 24h/1h, a
+// block starting, a digest at 08:00) and none of them look at what the user is
+// actually doing. This one is the opposite: the time is not what makes it due,
+// the mismatch is.
+//
+// The mismatch is only claimed when BOTH halves are known: a task worth being at
+// (see UrgentTask) and a focused app that the user's own app_category_rules
+// place in a different category. An app with no rule categorises as "Other",
+// which is a default rather than a statement, so it is never treated as a
+// mismatch — otherwise every unclassified tool would look like a distraction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OfftrackDue {
+    pub task_id: String,
+    pub title: String,
+    pub task_category: String,
+    pub app: String,
+    pub app_category: String,
+    // Why this task counts as urgent, for the notification text.
+    pub reason: OfftrackReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OfftrackReason {
+    // A timer is running on the task: the strongest signal, since time is being
+    // recorded against work that is not happening.
+    Tracking,
+    // The deadline is within the warning window.
+    DeadlineSoon,
+    // The task is simply in progress.
+    InProgress,
+}
+
+// One candidate task, already narrowed by the query.
+#[derive(Debug, Clone)]
+pub struct UrgentTask {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub tracking: bool,
+    pub deadline_soon: bool,
+    pub in_progress: bool,
+}
+
+pub fn offtrack_due(
+    tasks: &[UrgentTask],
+    app: &str,
+    app_category: &str,
+    notified_json: &str,
+    now: DateTime<Utc>,
+) -> Option<OfftrackDue> {
+    // An unknown app tells us nothing: "Other" is what categorize_app returns
+    // when NO rule matched, not a claim that the app is unrelated to the work.
+    if app.is_empty() || app_category == "Other" {
+        return None;
+    }
+
+    let today = now.with_timezone(&Local).format("%Y-%m-%d").to_string();
+    let notified: std::collections::HashMap<String, String> =
+        serde_json::from_str(notified_json).unwrap_or_default();
+
+    tasks
+        .iter()
+        // A task in the same category as the focused app is exactly what the
+        // user should be doing — never a mismatch.
+        .filter(|t| t.category != app_category)
+        // A task with no category cannot be compared against one.
+        .filter(|t| !t.category.is_empty())
+        .filter(|t| notified.get(&t.id) != Some(&today))
+        .filter_map(|t| {
+            let reason = if t.tracking {
+                OfftrackReason::Tracking
+            } else if t.deadline_soon {
+                OfftrackReason::DeadlineSoon
+            } else if t.in_progress {
+                OfftrackReason::InProgress
+            } else {
+                return None;
+            };
+            Some(OfftrackDue {
+                task_id: t.id.clone(),
+                title: t.title.clone(),
+                task_category: t.category.clone(),
+                app: app.to_string(),
+                app_category: app_category.to_string(),
+                reason,
+            })
+        })
+        // The strongest reason wins, so one notification names the task that
+        // matters most rather than whichever the query returned first.
+        .min_by_key(|d| match d.reason {
+            OfftrackReason::Tracking => 0,
+            OfftrackReason::DeadlineSoon => 1,
+            OfftrackReason::InProgress => 2,
+        })
+}
+
 async fn check_app_limits(app: &tauri::AppHandle, pool: &SqlitePool, muted: bool) {
     let now = Utc::now();
     let limits_json = crate::commands::settings::get_setting(pool, "app_limits").await.unwrap_or_default();
@@ -502,6 +601,118 @@ async fn check_app_limits(app: &tauri::AppHandle, pool: &SqlitePool, muted: bool
     }
     if let Ok(json) = serde_json::to_string(&notified) {
         let _ = crate::commands::settings::set_setting(pool, "app_limits_notified", &json).await;
+    }
+}
+
+async fn check_offtrack(app: &tauri::AppHandle, pool: &SqlitePool, muted: bool) {
+    // Off by default with the rest of the contextual notifications: this one is
+    // the most opinionated of them, and it should not appear unasked.
+    if crate::commands::settings::get_setting(pool, "offtrack_notifications")
+        .await
+        .as_deref()
+        != Some("true")
+    {
+        return;
+    }
+
+    let now = Utc::now();
+    let warn_hours = crate::commands::settings::get_u64_setting(pool, "deadline_warn_hours", 24).await as i64;
+
+    // The focused app comes from activity_log rather than from a live provider
+    // query: the provider lives inside the monitor loop and is not shared, and
+    // the log is written every tick anyway. Only a recent row counts — a stale
+    // one would describe what the user was doing an hour ago.
+    let Ok(row) = sqlx::query(
+        "SELECT app FROM activity_log
+         WHERE state = 'Active' AND app IS NOT NULL AND app != ''
+           AND timestamp >= datetime('now', '-5 minutes')
+         ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    else {
+        return;
+    };
+    let Some(row) = row else { return };
+    let focused: String = row.get("app");
+
+    let rules_json = crate::commands::settings::get_setting(pool, "app_category_rules")
+        .await
+        .unwrap_or_default();
+    let rules = crate::commands::monitor::parse_category_rules(&rules_json);
+    let app_category = crate::commands::monitor::categorize_app(&focused, &rules);
+
+    let warn_at = (now + chrono::Duration::hours(warn_hours)).to_rfc3339();
+    let Ok(rows) = sqlx::query(
+        "SELECT t.id, t.title, t.category, t.status, t.deadline,
+                EXISTS(SELECT 1 FROM task_sessions s
+                       WHERE s.task_id = t.id AND s.ended_at IS NULL) AS tracking
+         FROM tasks t
+         WHERE t.hidden = 0 AND t.deleted_at IS NULL
+           AND t.status NOT IN ('Done', 'Archived')
+           AND (t.status = 'InProgress'
+                OR (t.deadline IS NOT NULL AND t.deadline <= ?)
+                OR EXISTS(SELECT 1 FROM task_sessions s
+                          WHERE s.task_id = t.id AND s.ended_at IS NULL))",
+    )
+    .bind(&warn_at)
+    .fetch_all(pool)
+    .await
+    else {
+        return;
+    };
+
+    let tasks: Vec<UrgentTask> = rows
+        .iter()
+        .map(|r| {
+            let deadline: Option<String> = r.get("deadline");
+            UrgentTask {
+                id: r.get("id"),
+                title: r.get("title"),
+                category: r.get::<Option<String>, _>("category").unwrap_or_default(),
+                tracking: r.get::<i64, _>("tracking") != 0,
+                deadline_soon: deadline.is_some(),
+                in_progress: r.get::<String, _>("status") == "InProgress",
+            }
+        })
+        .collect();
+
+    let notified_json = crate::commands::settings::get_setting(pool, "offtrack_notified")
+        .await
+        .unwrap_or_default();
+    let Some(due) = offtrack_due(&tasks, &focused, &app_category, &notified_json, now) else {
+        return;
+    };
+
+    if !muted {
+        let lang = crate::i18n::current_lang(pool).await;
+        let key = match due.reason {
+            OfftrackReason::Tracking => "Идёт таймер задачи «{task}», а вы в {app}.",
+            OfftrackReason::DeadlineSoon => "Скоро дедлайн задачи «{task}», а вы в {app}.",
+            OfftrackReason::InProgress => "Задача «{task}» в работе, а вы в {app}.",
+        };
+        let body = crate::i18n::tr_args(
+            key,
+            lang,
+            &[
+                ("task", crate::monitor::activity::ellipsize(&due.title, crate::monitor::activity::TASK_TITLE_MAX)),
+                ("app", due.app.clone()),
+            ],
+        );
+        send_notification(app, pool, "offtrack", "Kriptag", &body).await;
+    }
+
+    // Marked under mute too, for the same reason as the app limits: otherwise a
+    // batch would arrive the moment the mute is lifted.
+    let mut notified: std::collections::HashMap<String, String> =
+        serde_json::from_str(&notified_json).unwrap_or_default();
+    let today = now.with_timezone(&Local).format("%Y-%m-%d").to_string();
+    notified.insert(due.task_id.clone(), today);
+    // Only today's marks are kept, or the setting would grow without bound.
+    let today_str = now.with_timezone(&Local).format("%Y-%m-%d").to_string();
+    notified.retain(|_, day| *day == today_str);
+    if let Ok(json) = serde_json::to_string(&notified) {
+        let _ = crate::commands::settings::set_setting(pool, "offtrack_notified", &json).await;
     }
 }
 
@@ -1031,6 +1242,126 @@ mod tests {
     }
     fn usage(category: &str, minutes: i64) -> CategoryMinutes {
         CategoryMinutes { category: category.to_string(), minutes }
+    }
+
+    // "You meant to be doing X, and you are in something else" (v0.10.33).
+    // Every other notification here fires on the clock; this one fires on a
+    // mismatch, so the cases that must stay SILENT matter as much as the one
+    // that fires.
+    fn urgent(id: &str, category: &str) -> UrgentTask {
+        UrgentTask {
+            id: id.to_string(),
+            title: format!("задача {id}"),
+            category: category.to_string(),
+            tracking: false,
+            deadline_soon: false,
+            in_progress: true,
+        }
+    }
+
+    #[test]
+    fn a_work_task_while_sitting_in_a_study_app_is_reported() {
+        let now = Utc::now();
+        let due = offtrack_due(&[urgent("t1", "Work")], "anki", "Study", "", now)
+            .expect("несовпадение категорий — это и есть повод");
+        assert_eq!(due.task_id, "t1");
+        assert_eq!(due.reason, OfftrackReason::InProgress);
+    }
+
+    // The control case: the same task, an app of the SAME category. Without this
+    // pair "never fires" would look exactly like correct behaviour.
+    #[test]
+    fn the_same_category_is_never_a_mismatch() {
+        let now = Utc::now();
+        assert_eq!(
+            offtrack_due(&[urgent("t1", "Work")], "kitty", "Work", "", now),
+            None,
+            "приложение той же категории — это ровно то, чем и надо заниматься"
+        );
+    }
+
+    // "Other" is what categorize_app returns when NO rule matched. Treating it as
+    // a mismatch would make every unclassified tool look like a distraction.
+    #[test]
+    fn an_unclassified_app_says_nothing_and_is_not_a_mismatch() {
+        let now = Utc::now();
+        assert_eq!(
+            offtrack_due(&[urgent("t1", "Work")], "randomapp", "Other", "", now),
+            None,
+            "«Other» — это отсутствие правила, а не утверждение о приложении"
+        );
+    }
+
+    #[test]
+    fn nothing_is_claimed_without_a_focused_app() {
+        let now = Utc::now();
+        assert_eq!(offtrack_due(&[urgent("t1", "Work")], "", "Study", "", now), None);
+    }
+
+    #[test]
+    fn a_task_without_a_category_cannot_be_compared() {
+        let now = Utc::now();
+        assert_eq!(offtrack_due(&[urgent("t1", "")], "anki", "Study", "", now), None);
+    }
+
+    // A task that is neither tracked, nor due soon, nor in progress is not urgent
+    // even if its category differs — the query may return it, the decision must not.
+    #[test]
+    fn a_task_with_no_urgency_is_not_a_reason() {
+        let now = Utc::now();
+        let mut t = urgent("t1", "Work");
+        t.in_progress = false;
+        assert_eq!(offtrack_due(&[t], "anki", "Study", "", now), None);
+    }
+
+    #[test]
+    fn a_running_timer_outranks_a_deadline_and_a_status() {
+        let now = Utc::now();
+        let mut tracked = urgent("t2", "Work");
+        tracked.tracking = true;
+        let mut soon = urgent("t3", "Work");
+        soon.deadline_soon = true;
+
+        let due = offtrack_due(&[urgent("t1", "Work"), soon, tracked], "anki", "Study", "", now)
+            .expect("повод есть");
+        assert_eq!(due.task_id, "t2", "таймер — самый сильный сигнал");
+        assert_eq!(due.reason, OfftrackReason::Tracking);
+    }
+
+    #[test]
+    fn one_task_is_announced_once_per_day_and_rearms_tomorrow() {
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        let notified = format!(r#"{{"t1":"{today}"}}"#);
+        assert_eq!(
+            offtrack_due(&[urgent("t1", "Work")], "anki", "Study", &notified, now),
+            None,
+            "сегодня уже сказали"
+        );
+
+        let tomorrow = now + chrono::Duration::days(1);
+        assert!(
+            offtrack_due(&[urgent("t1", "Work")], "anki", "Study", &notified, tomorrow).is_some(),
+            "назавтра повод снова в силе"
+        );
+    }
+
+    // A second task must still be announceable the same day: the cooldown is per
+    // task, not global.
+    #[test]
+    fn another_task_is_still_due_the_same_day() {
+        let now = Utc::now();
+        let today = now.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        let notified = format!(r#"{{"t1":"{today}"}}"#);
+        let due = offtrack_due(
+            &[urgent("t1", "Work"), urgent("t2", "Work")],
+            "anki",
+            "Study",
+            &notified,
+            now,
+        )
+        .expect("вторая задача ещё не объявлялась");
+        assert_eq!(due.task_id, "t2");
     }
 
     #[test]

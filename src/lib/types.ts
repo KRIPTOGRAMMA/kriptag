@@ -216,6 +216,7 @@ export interface AppSettings {
   color_border: string;
   quiet_until: string; // RFC3339; empty means off; a distant date means indefinite
   context_notifications: boolean;
+  offtrack_notifications: boolean;
   ai_fallback: boolean;
   openai_in_keyring: boolean;
   anthropic_in_keyring: boolean;

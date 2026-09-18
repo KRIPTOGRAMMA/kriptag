@@ -71,6 +71,7 @@ pub struct AppSettings {
     pub quiet_until: String,         // notification pause: RFC3339; empty means off; QUIET_FOREVER means indefinite
     #[serde(default = "default_true")]
     pub context_notifications: bool, // contextual triggers (overdue items, returning from InProgress, skipped days)
+    pub offtrack_notifications: bool, // "a task is waiting and you are in another app" — off by default
     #[serde(default)]
     pub ai_fallback: bool,           // automatic AI provider switching on error or unavailability
     #[serde(default)]
@@ -169,6 +170,7 @@ impl Default for AppSettings {
             color_border: String::new(),
             quiet_until: String::new(),
             context_notifications: true,
+            offtrack_notifications: false,
             ai_fallback: false,
             openai_in_keyring: false,
             anthropic_in_keyring: false,
@@ -292,6 +294,8 @@ pub async fn load_settings_raw(pool: &SqlitePool) -> AppResult<AppSettings> {
     if let Some(v) = get_setting(pool, "color_border").await { s.color_border = v; }
     if let Some(v) = get_setting(pool, "quiet_until").await { s.quiet_until = v; }
     if let Some(v) = get_setting(pool, "context_notifications").await { s.context_notifications = v != "false"; }
+    // Defaults to OFF, so the absence of the key must not read as enabled.
+    if let Some(v) = get_setting(pool, "offtrack_notifications").await { s.offtrack_notifications = v == "true"; }
     if let Some(v) = get_setting(pool, "ai_fallback").await { s.ai_fallback = v == "true"; }
     if let Some(v) = get_setting(pool, "custom_theme_presets").await { s.custom_theme_presets = v; }
     if let Some(v) = get_setting(pool, "app_category_rules").await { s.app_category_rules = v; }
@@ -374,6 +378,7 @@ pub async fn save_settings(
     };
     set_setting(pool.inner(), "quiet_until", quiet).await?;
     set_setting(pool.inner(), "context_notifications", if settings.context_notifications { "true" } else { "false" }).await?;
+    set_setting(pool.inner(), "offtrack_notifications", if settings.offtrack_notifications { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "ai_fallback", if settings.ai_fallback { "true" } else { "false" }).await?;
     // App categorization rules: only a valid JSON array is stored
     let rules = if crate::commands::monitor::parse_category_rules(&settings.app_category_rules).is_empty()
@@ -479,6 +484,35 @@ mod db_tests {
         // A repeated write overwrites rather than duplicating
         set_setting(&pool, "ai_provider", "openai").await.unwrap();
         assert_eq!(get_setting(&pool, "ai_provider").await.unwrap(), "openai");
+    }
+
+    // The off-track notification is the only one that judges what the user is
+    // doing right now, so it must default to OFF — and a missing key must read
+    // as off, not as "not false" (the convention its neighbours use).
+    #[tokio::test]
+    async fn offtrack_notifications_default_to_off_and_survive_a_write() {
+        let pool = test_pool().await;
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert!(!s.offtrack_notifications, "по умолчанию выключено");
+
+        set_setting(&pool, "offtrack_notifications", "true").await.unwrap();
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert!(s.offtrack_notifications, "явное «true» включает");
+
+        set_setting(&pool, "offtrack_notifications", "false").await.unwrap();
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert!(!s.offtrack_notifications, "и выключается обратно");
+
+        // The case that separates `== "true"` from the neighbours' `!= "false"`:
+        // anything other than an explicit "true" must stay OFF. With `!= "false"`
+        // a stray value would silently ENABLE the one notification that judges
+        // what the user is doing — the opposite of a safe default.
+        set_setting(&pool, "offtrack_notifications", "мусор").await.unwrap();
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert!(
+            !s.offtrack_notifications,
+            "любое значение кроме явного «true» оставляет уведомление выключенным"
+        );
     }
 
     #[tokio::test]

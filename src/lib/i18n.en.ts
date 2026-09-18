@@ -627,6 +627,7 @@ export const EN: Record<string, string> = {
   "Колонка {n}": "Column {n}",
   "Комбинация не подходит": "This combination will not work",
   "Контекстные уведомления (накопились просрочки, возврат к задаче «в работе»)": "Contextual notifications (overdue piling up, returning to an in-progress task)",
+  "Напоминать, когда задача ждёт, а вы в приложении другой категории": "Remind me when a task is waiting and I am in an app of another category",
   "Конфликт: уже занято действием «{label}» — выберите другую комбинацию.": "Conflict: already used by “{label}” — choose another combination.",
   "Лес": "Forest",
   "Лимиты времени на категории (мин/день)": "Category time limits (min/day)",

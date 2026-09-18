@@ -4873,6 +4873,31 @@ test("фокус-режим: тумблер в настройках сохран
   await expect(page.getByLabel("Фокус-режим: авто-пауза уведомлений на время помодоро-работы и активных тайм-блоков")).not.toBeChecked();
 });
 
+// Единственное уведомление, которое судит о том, чем человек занят прямо
+// сейчас, поэтому оно выключено по умолчанию и должно быть включено явно.
+//
+// Проверяет UI и мок-хранилище, но НЕ запись в Rust: e2e гоняет мок в
+// localStorage, и удаление set_setting на бэкенде этот тест не роняет.
+// За саму цепочку настроек отвечают тесты в settings.rs.
+test("уведомление «задача ждёт, а вы в другом приложении»: выключено по умолчанию, тумблер переживает перезагрузку", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+  const toggle = page.getByLabel("Напоминать, когда задача ждёт, а вы в приложении другой категории");
+  await expect(toggle).not.toBeChecked();
+
+  await flipSwitch(page, "Напоминать, когда задача ждёт");
+  await expect(toggle).toBeChecked();
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+  await expect(page.getByLabel("Напоминать, когда задача ждёт, а вы в приложении другой категории")).toBeChecked();
+});
+
 test("экран «Сегодня»: показывает блок дня и дедлайны, клик по каждому ведёт в задачу", async ({ page }) => {
   await withMock(page);
   await page.goto("/");

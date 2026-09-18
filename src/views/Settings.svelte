@@ -301,6 +301,7 @@
     color_border: "",
     quiet_until: "",
     context_notifications: true,
+    offtrack_notifications: false,
     ai_fallback: false,
     openai_in_keyring: false,
     anthropic_in_keyring: false,
@@ -1561,6 +1562,13 @@
     </div>
     <label class="check" style="margin-top:10px;">
       <Switch bind:checked={settings.context_notifications} />{t("Контекстные уведомления (накопились просрочки, возврат к задаче «в работе»)")}</label>
+
+    <!-- Off by default: this is the only notification that judges what the user
+         is doing right now, so it has to be asked for. It needs app rules to
+         mean anything — an app with no rule classifies as "Other" and is never
+         treated as a mismatch. -->
+    <label class="check">
+      <Switch bind:checked={settings.offtrack_notifications} />{t("Напоминать, когда задача ждёт, а вы в приложении другой категории")}</label>
     <label class="check" style="margin-top:6px;">
       <Switch bind:checked={settings.focus_mode_auto} />{t("Фокус-режим: авто-пауза уведомлений на время помодоро-работы и активных тайм-блоков")}</label>
     <label class="field" style="margin-top:8px;">

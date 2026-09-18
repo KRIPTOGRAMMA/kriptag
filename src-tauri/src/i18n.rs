@@ -82,6 +82,9 @@ fn en(key: &str) -> Option<&'static str> {
         // --- Notifications: digest, goals, limits ---
         "Утренняя сводка" => "Morning digest",
         "{cat}: {mins} мин из {limit} сегодня" => "{cat}: {mins} min of {limit} today",
+        "Идёт таймер задачи «{task}», а вы в {app}." => "The timer for \"{task}\" is running, but you are in {app}.",
+        "Скоро дедлайн задачи «{task}», а вы в {app}." => "\"{task}\" is due soon, but you are in {app}.",
+        "Задача «{task}» в работе, а вы в {app}." => "\"{task}\" is in progress, but you are in {app}.",
         // --- Notifications: activity ---
         "Вы отсутствовали {n} мин. Продолжим задачу «{task}» или сделаем перерыв?" =>
             "You were away for {n} min. Continue the task “{task}” or take a break?",
@@ -236,6 +239,9 @@ mod tests {
             "Перерыв {n} минут — отдохни",
             "Перерыв окончен: {n} минут работы",
             "{cat}: {mins} мин из {limit} сегодня",
+            "Идёт таймер задачи «{task}», а вы в {app}.",
+            "Скоро дедлайн задачи «{task}», а вы в {app}.",
+            "Задача «{task}» в работе, а вы в {app}.",
             "Вы отсутствовали {n} мин. Продолжим задачу «{task}» или сделаем перерыв?",
             "Вы отсутствовали {n} мин. Ближайшая задача: {task}",
             "Вы отсутствовали {n} мин. С возвращением!",
