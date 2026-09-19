@@ -992,13 +992,39 @@
           // and only when an image was actually found in the clipboard.
           return false;
         },
+        // A drag begins here and ends on the document (see below). While it is
+        // in progress the selection is still being made.
+        mousedown: () => {
+          selecting = true;
+          return false;
+        },
+        // Shift+arrows extend a selection for as long as Shift is held.
+        keydown: (event) => {
+          if (event.key === "Shift") selecting = true;
+          return false;
+        },
+        keyup: (event, v) => {
+          if (event.key === "Shift") {
+            selecting = false;
+            reportSelection(v);
+          }
+          return false;
+        },
       }),
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
           value = update.state.doc.toString();
         }
+        // The rule: while a gesture is running the menu may only be HIDDEN, never
+        // shown — showing it mid-drag is what put a panel under the moving
+        // cursor. With no gesture running the selection is already final (Ctrl+A,
+        // a command, a click that collapses it), so it is reported at once.
+        //
+        // Hiding stays immediate either way: a menu left hanging beside a
+        // selection that no longer exists is worse than no menu.
         if (update.docChanged || update.selectionSet) {
-          reportSelection(update.view);
+          if (selecting) reportSelectionCleared(update.view);
+          else reportSelection(update.view);
         }
       }),
     ];
@@ -1007,9 +1033,34 @@
       state: EditorState.create({ doc: value, extensions }),
       parent: hostEl,
     });
+
+    // Mouse half of "the selection gesture ended", on the DOCUMENT rather than
+    // through domEventHandlers: dragging a selection regularly ends with the
+    // pointer outside the editor (selecting a paragraph downwards past the last
+    // line, for instance), and an editor-scoped mouseup never fires then — the
+    // menu would simply never appear. CodeMirror itself tracks drags the same
+    // way, on contentDOM.ownerDocument.
+    const onDocMouseUp = () => {
+      selecting = false;
+      if (view) reportSelection(view);
+    };
+    // Captured into a local: inside the cleanup closure TypeScript cannot know
+    // hostEl is still set, and removing the listener from a different document
+    // than it was added to would leak it.
+    const doc = hostEl.ownerDocument;
+    doc.addEventListener("mouseup", onDocMouseUp);
+    removeDocMouseUp = () => doc.removeEventListener("mouseup", onDocMouseUp);
   });
 
-  onDestroy(() => view?.destroy());
+  let removeDocMouseUp: (() => void) | null = null;
+  // True while a selection gesture is in progress: a mouse drag, or Shift held
+  // down for arrow-extension. Not $state — nothing renders from it.
+  let selecting = false;
+
+  onDestroy(() => {
+    removeDocMouseUp?.();
+    view?.destroy();
+  });
 
   // External changes to value (switching notes, inserting from the composer or AI):
   // the document is synced only when it has genuinely diverged from the state.
@@ -1030,6 +1081,11 @@
   // show a floating action menu beside it. The coordinates are already page-level
   // (coordsAtPos returns a viewport-relative rect of the view itself, not of the
   // host), so the parent need not recompute anything.
+  //
+  // Called only when a selection gesture has ENDED (mouseup, or Shift released).
+  // It used to run on every update.selectionSet, which fires on each pixel of a
+  // drag and on each Shift+arrow: the panel appeared the instant a selection
+  // started and then chased the cursor across the screen.
   function reportSelection(v: EditorView) {
     if (!onSelectionChange) return;
     const range = v.state.selection.main;
@@ -1044,6 +1100,14 @@
       return;
     }
     onSelectionChange({ text, from: range.from, to: range.to, left: coords.left, top: coords.top });
+  }
+
+  // The half of the old behaviour that must stay immediate: as soon as the
+  // selection is gone (a plain click, typing, an undo), the menu has to go with
+  // it. This never SHOWS the menu, so it cannot reintroduce the chasing.
+  function reportSelectionCleared(v: EditorView) {
+    if (!onSelectionChange) return;
+    if (v.state.selection.main.empty) onSelectionChange(null);
   }
 
   // Replaces a range with the result of an AI action on the selection. from/to are

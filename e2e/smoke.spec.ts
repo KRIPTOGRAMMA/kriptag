@@ -3674,6 +3674,91 @@ test("таблицы в заметках: рендерится <table>, ячей
   await expect(page.locator(".cm-table td")).toHaveCount(4);
 });
 
+// Панель появляется, только когда выделение ЗАКОНЧЕНО. Раньше она показывалась
+// на каждый update.selectionSet — то есть на каждом пикселе протягивания мышью и
+// на каждую Shift+стрелку, — и гонялась за курсором, мешая выделять.
+test("ИИ по выделению: панель не появляется посреди протягивания мышью", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.getByRole("button", { name: "+ Новая заметка" }).click();
+
+  const editor = noteEditor(page);
+  await editor.click();
+  await page.keyboard.insertText("первая строка для выделения мышью");
+
+  // Координаты берём от самой строки текста, а не от рамки редактора: у него
+  // есть отступы, и клик по ним выделения не делает.
+  const line = editor.locator(".cm-line").first();
+  const box = (await line.boundingBox())!;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + 2, y);
+  await page.mouse.down();
+  // Середина жеста: выделение уже непустое, но кнопка мыши ещё не отпущена.
+  await page.mouse.move(box.x + box.width * 0.6, y, { steps: 10 });
+  await expect(page.locator(".selection-menu")).toHaveCount(0);
+
+  // Отпустили — панель появилась.
+  await page.mouse.up();
+  await expect(page.locator(".selection-menu")).toBeVisible();
+});
+
+// Shift+стрелки — второй способ выделять; панель обязана дождаться отпускания
+// Shift, иначе она дёргается на каждом нажатии стрелки.
+test("ИИ по выделению: панель ждёт отпускания Shift при выделении с клавиатуры", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.getByRole("button", { name: "+ Новая заметка" }).click();
+
+  const editor = noteEditor(page);
+  await editor.click();
+  await page.keyboard.insertText("текст для клавиатурного выделения");
+  await page.keyboard.press("Home");
+
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".selection-menu")).toHaveCount(0);
+
+  await page.keyboard.up("Shift");
+  await expect(page.locator(".selection-menu")).toBeVisible();
+});
+
+// Список действий — одна колонка и без крестика. Четыре чипа в строку
+// переносились на вторую, и ✕ оказывался рядом с «Грамматика», читаясь как
+// часть этого действия. Закрывать нечего: панель привязана к выделению.
+test("ИИ по выделению: действия идут в одну колонку, крестика в списке нет", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
+  await withMock(page);
+  await page.goto("/");
+
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.getByRole("button", { name: "+ Новая заметка" }).click();
+
+  const editor = noteEditor(page);
+  await editor.click();
+  await page.keyboard.insertText("исходный текст для правки");
+  await page.keyboard.press("ControlOrMeta+a");
+
+  const menu = page.locator(".selection-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.getByTitle("Закрыть")).toHaveCount(0);
+
+  // Одна колонка проверяется по факту раскладки, а не по классу: у всех четырёх
+  // чипов должен совпадать left, и каждый следующий — ниже предыдущего.
+  const boxes = await menu.locator(".chip").evaluateAll(els =>
+    els.map(e => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; }));
+  expect(boxes.length).toBe(4);
+  for (let i = 1; i < boxes.length; i++) {
+    expect(boxes[i].x, "чипы должны стоять в одну колонку").toBe(boxes[0].x);
+    expect(boxes[i].y, "каждый следующий чип — ниже предыдущего").toBeGreaterThan(boxes[i - 1].y);
+  }
+});
+
 test("ИИ по выделению в редакторе: меню действий, предпросмотр результата, подтверждение заменяет выделение", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
   await withMock(page);
@@ -7436,3 +7521,4 @@ test("состояние экранов: Корзина НЕ запоминае�
   // подвид, а не содержимое базы.
   await expect(page.locator(".task-row")).toHaveCount(3);
 });
+

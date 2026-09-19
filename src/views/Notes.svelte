@@ -1195,7 +1195,11 @@ ${bodyHtml}
                the tree (zen mode makes .editor-pane a fixed overlay), so fixed is
                more reliable than recomputing into the nearest relative parent's
                coordinate system. -->
-          <div class="selection-menu" style="left:{selectionMenu.left}px; top:{selectionMenu.top}px;">
+          <div
+            class="selection-menu"
+            class:selection-menu--actions={!selectionBusy && !selectionResult}
+            style="left:{selectionMenu.left}px; top:{selectionMenu.top}px;"
+          >
             {#if selectionBusy}
               <span class="muted" style="padding:4px 8px;">{t("Думаю…")}</span>
             {:else if selectionResult}
@@ -1208,10 +1212,14 @@ ${bodyHtml}
                 <button class="btn-icon" title={t("Отмена")} onclick={dismissSelectionResult}>✕</button>
               {/if}
             {:else}
+              <!-- No close button on the action list: the menu is tied to the
+                   selection, and dropping the selection (a click anywhere, Escape,
+                   typing) already removes it. A ✕ next to the last action read as
+                   part of that action rather than as "close". The two states below
+                   keep theirs — a result has to be dismissed explicitly. -->
               {#each Object.entries(SELECTION_ACTION_LABELS) as [action, label] (action)}
                 <button class="chip" onclick={() => runSelectionAction(action as SelectionAction)}>{label}</button>
               {/each}
-              <button class="btn-icon" title={t("Закрыть")} onclick={() => selectionMenu = null}>✕</button>
             {/if}
           </div>
         {/if}
@@ -1683,6 +1691,16 @@ ${bodyHtml}
     background: var(--bg-card);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
     transform: translateY(8px);
+  }
+
+  /* Only the action list is a column. The other two states — "thinking" and a
+     result with ✓/✕ — are a single row by nature, and stretching them into a
+     column put the two buttons on separate full-width lines. */
+  .selection-menu--actions {
+    flex-direction: column;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    width: 160px;
   }
 
   .selection-preview {
