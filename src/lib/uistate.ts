@@ -25,6 +25,7 @@ export interface UiState {
   settingsTab: string;
   dashboardAppPeriod: number;
   boardColWidths: Record<string, number>;
+  noteViewMode: string;
   noteId: string | null;
 }
 

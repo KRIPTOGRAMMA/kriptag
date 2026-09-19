@@ -18,7 +18,7 @@
   import type { Note, NoteRevision } from "../lib/types";
   import { localDateKey, toLocalInput, localeTag } from "../lib/datetime";
   import { isTypingTarget, actionForKey, nextIndex, reconcileIndex } from "../lib/listnav";
-  import { loadUiState, saveUiState } from "../lib/uistate";
+  import { loadUiState, saveUiState, restoreOneOf } from "../lib/uistate";
   type EditorExports = { focus: () => void; formatBold: () => void; formatItalic: () => void; formatCode: () => void; formatHeading: () => void; formatChecklist: () => void; formatWikiLink: () => void; formatQuote: () => void; formatOrderedList: () => void; formatLink: () => void; insertTable: () => void; replaceRange: (from: number, to: number, text: string) => void; insertAtCursor: (text: string) => void };
   let editorRef: EditorExports | undefined = $state();
 
@@ -39,7 +39,54 @@
   let zenMode = $state(false);
   // The list and the Trash are mutually exclusive, like the segmented toggle in Tasks.
   let listSubView: "notes" | "trash" = $state("notes");
+  // "tiles" is an overview of ALL notes across the full width, with the editor
+  // hidden: the list pane is 210px, and a grid of previews cannot live there.
+  // Clicking a tile opens the note and returns to the list view — the grid is a
+  // gallery you pick from, not a place to work in.
+  let noteViewMode = $state<"list" | "tiles">(
+    restoreOneOf(loadUiState().noteViewMode, ["list", "tiles"] as const, "list"),
+  );
   let showAsk = $state(false);
+
+  $effect(() => { saveUiState({ noteViewMode: noteViewMode }); });
+
+  // Tiles apply to the notes themselves only. Derived rather than checked in
+  // three places, so the list pane, the grid and the editor cannot disagree
+  // about which mode is showing.
+  const tilesMode = $derived(noteViewMode === "tiles" && listSubView === "notes" && !zenMode);
+
+  // A preview for a tile: the note's text without markdown noise, trimmed to a
+  // few lines. Headings, emphasis and link syntax are stripped rather than
+  // rendered — a tile is a glance, and "## " in it reads as a typo.
+  function tilePreview(content: string): string {
+    return content
+      .replace(/^```[\s\S]*?```$/gm, "")
+      .replace(/^\s*#{1,6}\s+/gm, "")
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/\[\[([^\]]+)\]\]/g, "$1")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/[*_`>]/g, "")
+      .split("\n")
+      .map(l => l.trim())
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 300);
+  }
+
+  // Opening from a tile IS selecting a note — it must go through selectNote, not
+  // reimplement a part of it.
+  //
+  // The first version only assigned selectedId, and that was wrong twice over.
+  // The editor renders editTitle/editContent, which stayed on the PREVIOUS note,
+  // so a tile opened somebody else's text; and scheduleSave then took
+  // id = selectedId (the new note) with editContent (the old one) and wrote the
+  // old text over the note just opened. A display bug on the surface, data loss
+  // underneath.
+  async function openFromTile(note: Note) {
+    await selectNote(note);
+    // Back to the list: the grid is for choosing, the editor is for working.
+    noteViewMode = "list";
+  }
 
   const selected = $derived(noteStore.notes.find(n => n.id === selectedId) ?? null);
   const otherTitles = $derived(noteStore.notes.filter(n => n.id !== selectedId).map(n => n.title));
@@ -854,7 +901,7 @@ ${bodyHtml}
 
 <svelte:window onkeydown={onZenKeydown} />
 
-<div class="notes card">
+<div class="notes card" class:tiles-mode={tilesMode}>
   <!-- The notes list -->
   <div class="list-pane">
     <div class="list-head">
@@ -871,6 +918,14 @@ ${bodyHtml}
         <button class:active={listSubView === "notes"} onclick={() => listSubView = "notes"}>{t("Заметки")}</button>
         <button class:active={listSubView === "trash"} onclick={() => { listSubView = "trash"; noteStore.loadDeleted(); }}>{t("Корзина")}</button>
       </div>
+      <!-- Only over the notes themselves: the Trash is a short list one restores
+           from, and a grid of previews there would suggest it is a place to browse. -->
+      {#if listSubView === "notes"}
+        <div class="seg seg-list">
+          <button class:active={noteViewMode === "list"} onclick={() => noteViewMode = "list"}>{t("Список")}</button>
+          <button class:active={noteViewMode === "tiles"} onclick={() => noteViewMode = "tiles"}>{t("Плитки")}</button>
+        </div>
+      {/if}
       <input class="filter-input" bind:value={noteFilter} placeholder={t("Поиск...")} />
       <div class="filter-row">
         <select bind:value={filterTag} class="filter-select">
@@ -977,7 +1032,26 @@ ${bodyHtml}
        CodeMirror states and undo histories for the very same text — the same class
        of bug that was fixed for switching between notes. -->
   <div class="editor-pane" class:zen={zenMode}>
-    {#if !selected}
+    {#if tilesMode}
+      <!-- The overview. It replaces the editor rather than sitting beside it:
+           tiles need the full width, and the list pane is hidden in this mode
+           (see .notes.tiles-mode), so nothing is competing for the room. -->
+      {#if filteredNotes.length === 0}
+        <div class="empty empty-editor">
+          {noteStore.notes.length === 0 ? t("Нет заметок") : t("Нет заметок по фильтру")}
+        </div>
+      {:else}
+        <div class="note-tiles">
+          {#each filteredNotes as note (note.id)}
+            <button class="note-tile" class:pinned={note.pinned} onclick={() => openFromTile(note)}>
+              <div class="tile-title">{note.title}</div>
+              <div class="tile-preview">{tilePreview(note.content)}</div>
+              <div class="tile-date">{formatDate(note.updated_at)}</div>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else if !selected}
       <!-- The window buttons float over the top-right corner (WindowControls is
            position:fixed and transparent). With a note open .editor-head reserves
            room for them; with none, this branch is all there is, so the reservation
@@ -1324,6 +1398,84 @@ ${bodyHtml}
     display: flex;
     height: 100%;
     overflow: hidden;
+  }
+
+  /* In tiles mode the pane keeps its head — the search box and the filters are
+     what the grid is filtered BY, so hiding them would leave no way to narrow it
+     — but the row list below is dropped: it would duplicate the grid. */
+  .notes.tiles-mode .note-list {
+    display: none;
+  }
+
+  .note-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+    padding: 12px;
+    overflow-y: auto;
+    align-content: start;
+    height: 100%;
+    box-sizing: border-box;
+  }
+
+  .note-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    /* Fixed height so the grid stays a grid: tiles sized by their text turn the
+       rows into a ragged staircase and the eye loses the columns. */
+    height: 140px;
+    padding: 10px 12px;
+    text-align: left;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .note-tile:hover {
+    border-color: var(--accent);
+  }
+  .note-tile.pinned {
+    border-left: 2px solid var(--accent);
+  }
+
+  .tile-title {
+    font-weight: 600;
+    font-size: 13px;
+    /* One line: a long title must not eat the preview it introduces. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tile-preview {
+    flex: 1;
+    min-height: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    /* Clamped to whole lines with an ellipsis. Plain overflow: hidden cut the
+       last line through the middle of the letters, which reads as a rendering
+       fault rather than as "there is more". */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    /* The clamp limits LINES, the flex row limits HEIGHT, and they have to agree:
+       with flex: 1 the box was taller than four lines, so a fifth line rendered
+       below the ellipsis and was then cut by the tile. 4 x line-height, fixed. */
+    flex: none;
+    max-height: calc(4 * 1.4 * 12px);
+  }
+
+  .tile-date {
+    font-size: 11px;
+    color: var(--text-secondary);
+    /* Pushed to the bottom edge: the preview no longer stretches, so without
+       this the date would float right under a short note's text and sit at a
+       different height in every tile. */
+    margin-top: auto;
   }
 
   .list-pane {

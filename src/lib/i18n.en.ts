@@ -118,6 +118,7 @@ export const EN: Record<string, string> = {
   "История": "History",
   "Корзина": "Trash",
   "Список": "List",
+  "Плитки": "Tiles",
   "Доска": "Board",
   "+ Новая": "+ New",
   "Проекты": "Projects",

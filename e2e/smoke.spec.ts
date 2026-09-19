@@ -3677,6 +3677,73 @@ test("таблицы в заметках: рендерится <table>, ячей
 // Панель появляется, только когда выделение ЗАКОНЧЕНО. Раньше она показывалась
 // на каждый update.selectionSet — то есть на каждом пикселе протягивания мышью и
 // на каждую Shift+стрелку, — и гонялась за курсором, мешая выделять.
+// Второй вид заметок: сетка плиток на всю ширину вместо редактора. Панель
+// списка остаётся ради поиска и фильтров — ими же фильтруются плитки, — но
+// строки списка в ней скрыты, чтобы не дублировать сетку.
+test("плитки заметок: сетка показывает превью, клик открывает заметку и возвращает список", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [], projects: [], settings: { onboarding_complete: true },
+    notes: [
+      { id: "n1", title: "Идеи", content: "## Вступление\nПро **метрики** и [[Архитектуру]].", tags: [], pinned: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: "n2", title: "Покупки", content: "молоко и хлеб", tags: [], pinned: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    ],
+  });
+  await withMock(page);
+  await page.goto("/");
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+
+  const toggle = page.locator(".seg-list").getByRole("button", { name: "Плитки", exact: true });
+  await toggle.click();
+
+  const tiles = page.locator(".note-tile");
+  await expect(tiles).toHaveCount(2);
+  // Строки списка скрыты: сетка их заменяет, а не дополняет.
+  await expect(page.locator(".note-list")).toBeHidden();
+
+  // Разметка в превью вычищена: "##" и "**" в плитке читаются как опечатка.
+  const preview = tiles.first().locator(".tile-preview");
+  await expect(preview).toContainText("Вступление");
+  await expect(preview).not.toContainText("#");
+  await expect(preview).not.toContainText("*");
+  await expect(preview).not.toContainText("[[");
+
+  // Клик открывает ИМЕННО ЭТУ заметку. Первая версия теста проверяла лишь то,
+  // что сетка исчезла и редактор появился, — и пропустила баг, где openFromTile
+  // ставил только selectedId: редактор показывал текст ПРЕДЫДУЩЕЙ заметки, а
+  // автосохранение через 800 мс записывало его поверх открытой.
+  await tiles.nth(1).click();
+  await expect(page.locator(".note-tile")).toHaveCount(0);
+  await expect(page.locator(".editor-head")).toBeVisible();
+
+  const title = page.locator(".editor-head input").first();
+  await expect(title).toHaveValue("Покупки");
+  await expect(noteEditor(page)).toContainText("молоко и хлеб");
+
+  // И автосохранение не должно затереть её чужим текстом.
+  await page.waitForTimeout(1200);
+  const saved = await page.evaluate(() => {
+    const db = JSON.parse(localStorage.getItem("__mock_db") || "{}");
+    return (db.notes || []).map((n: any) => [n.id, n.content]);
+  });
+  expect(saved).toContainEqual(["n2", "молоко и хлеб"]);
+  expect(saved).toContainEqual(["n1", "## Вступление\nПро **метрики** и [[Архитектуру]]."]);
+});
+
+// Выбор вида переживает перезапуск, как и режим Доска в Задачах.
+test("плитки заметок: выбранный вид сохраняется между запусками", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [], settings: { onboarding_complete: true } });
+  await withMock(page);
+  await page.goto("/");
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.locator(".seg-list").getByRole("button", { name: "Плитки", exact: true }).click();
+
+  await page.reload();
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await expect(
+    page.locator(".seg-list").getByRole("button", { name: "Плитки", exact: true }),
+  ).toHaveClass(/active/);
+});
+
 test("ИИ по выделению: панель не появляется посреди протягивания мышью", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], settings: { onboarding_complete: true, ai_provider: "local" } });
   await withMock(page);
@@ -7521,4 +7588,5 @@ test("состояние экранов: Корзина НЕ запоминае�
   // подвид, а не содержимое базы.
   await expect(page.locator(".task-row")).toHaveCount(3);
 });
+
 
