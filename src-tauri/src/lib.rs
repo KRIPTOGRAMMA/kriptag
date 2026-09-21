@@ -142,6 +142,64 @@ fn register_global_hotkeys(app: &tauri::AppHandle, global_keybinds: &str) -> Vec
 
 // The single path for opening the quick-capture window: record the mode, notify
 // the window (if it is already mounted) and show it. Used both by the command
+/// Which screen edge the quick window is docked to, if any.
+///
+/// Docking is a Windows-only feature, and that is a platform limit rather than a
+/// choice: on Wayland a client cannot position its own window at all — the
+/// compositor decides. Verified on Hyprland before writing any of this:
+/// set_size/set_position return Ok, the window believes it moved, and the
+/// compositor keeps it centred where it put it. The same code works on Windows,
+/// where the application does control its geometry.
+///
+/// Stored as a settings string so it survives restarts like every other
+/// preference; "none" (or anything unrecognised) means the window opens centred,
+/// which is what it has always done.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DockEdge {
+    None,
+    Left,
+    Right,
+}
+
+impl DockEdge {
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "left" => DockEdge::Left,
+            "right" => DockEdge::Right,
+            _ => DockEdge::None,
+        }
+    }
+}
+
+/// Where the quick window goes when docked, in logical pixels.
+///
+/// Pure so the arithmetic can be tested without a monitor: the one thing that
+/// can silently go wrong here is putting the window off-screen, and that is
+/// arithmetic, not windowing.
+///
+/// `work_w`/`work_h` are the monitor's logical size, `win_w`/`win_h` the window's
+/// own. Returns None when there is nothing to do.
+pub fn dock_position(
+    edge: DockEdge,
+    work_w: f64,
+    work_h: f64,
+    win_w: f64,
+    win_h: f64,
+) -> Option<(f64, f64)> {
+    let x = match edge {
+        DockEdge::None => return None,
+        DockEdge::Left => 0.0,
+        // The right edge is the monitor's width MINUS the window: using the width
+        // itself would place the window's left corner at the edge and push the
+        // whole thing off the screen.
+        DockEdge::Right => (work_w - win_w).max(0.0),
+    };
+    // Vertically centred rather than at the top: a docked panel next to the
+    // middle of the screen is where the pointer already is.
+    let y = ((work_h - win_h) / 2.0).max(0.0);
+    Some((x, y))
+}
+
 // from the frontend and by the global hotkeys.
 fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
     let mode = normalize_quick_mode(mode);
@@ -151,7 +209,39 @@ fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
     let _ = app.emit_to(QUICK_WINDOW_LABEL, "quick-mode", mode);
     if let Some(w) = app.get_webview_window(QUICK_WINDOW_LABEL) {
         let _ = w.show();
+        // Positioned AFTER show(), not before: a window moved while hidden can
+        // end up off-screen (tauri#4056). Docking is silently a no-op where the
+        // platform does not allow it — see DockEdge.
+        apply_dock(app, &w);
         let _ = w.set_focus();
+    }
+}
+
+/// Moves the quick window to its docked edge, if one is configured.
+///
+/// Every failure here is ignored on purpose: docking is a convenience, and a
+/// window that opens centred is a working window. Never fall back to some other
+/// position — that would move the window somewhere the user did not ask for.
+fn apply_dock(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
+    let Some(pool) = app.try_state::<sqlx::SqlitePool>() else { return };
+    let edge = tauri::async_runtime::block_on(async {
+        commands::settings::get_setting(&pool, "quick_dock_edge")
+            .await
+            .unwrap_or_default()
+    });
+    let edge = DockEdge::from_setting(&edge);
+    if edge == DockEdge::None {
+        return;
+    }
+
+    let Ok(Some(monitor)) = w.current_monitor() else { return };
+    let scale = monitor.scale_factor();
+    let work = monitor.size().to_logical::<f64>(scale);
+    let Ok(size) = w.outer_size() else { return };
+    let win = size.to_logical::<f64>(scale);
+
+    if let Some((x, y)) = dock_position(edge, work.width, work.height, win.width, win.height) {
+        let _ = w.set_position(tauri::LogicalPosition::new(x, y));
     }
 }
 
@@ -934,7 +1024,7 @@ pub fn run() {
 }
 #[cfg(test)]
 mod tests {
-    use super::{is_autostart, normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins};
+    use super::{dock_position, is_autostart, normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins, DockEdge};
     use chrono::{TimeZone, Utc};
 
     fn now() -> chrono::DateTime<Utc> {
@@ -1051,6 +1141,56 @@ mod tests {
              сообщать базовый режим, иначе уведомление о возврате вернётся к \
              измерению фокуса окна (v0.10.29)."
         );
+    }
+
+    // Docking the quick window to a screen edge (v0.10.38). The arithmetic is the
+    // only part that can silently go wrong — putting the window off-screen — so
+    // it is tested; whether the platform honours the move is not ours to test.
+    #[test]
+    fn the_right_edge_subtracts_the_window_width() {
+        // 1536 wide monitor, 480 wide window: the window's LEFT corner goes to
+        // 1056, so its right edge lands exactly on the screen edge. Using the
+        // monitor width itself would push the whole window off-screen — the one
+        // mistake this function exists to prevent.
+        let (x, _) = dock_position(DockEdge::Right, 1536.0, 864.0, 480.0, 340.0).unwrap();
+        assert_eq!(x, 1056.0);
+        assert_eq!(x + 480.0, 1536.0, "правый край окна совпадает с краем экрана");
+    }
+
+    #[test]
+    fn the_left_edge_is_the_origin() {
+        let (x, _) = dock_position(DockEdge::Left, 1536.0, 864.0, 480.0, 340.0).unwrap();
+        assert_eq!(x, 0.0);
+    }
+
+    #[test]
+    fn a_docked_window_is_centred_vertically() {
+        let (_, y) = dock_position(DockEdge::Left, 1536.0, 864.0, 480.0, 340.0).unwrap();
+        assert_eq!(y, 262.0, "(864 - 340) / 2");
+    }
+
+    // A window wider or taller than the screen must not be given a negative
+    // coordinate: that is off-screen in the other direction.
+    #[test]
+    fn a_window_larger_than_the_screen_stays_at_the_origin() {
+        let (x, y) = dock_position(DockEdge::Right, 400.0, 300.0, 480.0, 340.0).unwrap();
+        assert_eq!((x, y), (0.0, 0.0), "отрицательная координата увела бы окно за экран");
+    }
+
+    #[test]
+    fn no_dock_means_no_move_at_all() {
+        assert_eq!(dock_position(DockEdge::None, 1536.0, 864.0, 480.0, 340.0), None);
+    }
+
+    // An unknown or absent setting must read as "not docked": the window then
+    // opens centred, exactly as it always has.
+    #[test]
+    fn an_unrecognised_setting_does_not_dock() {
+        assert_eq!(DockEdge::from_setting("left"), DockEdge::Left);
+        assert_eq!(DockEdge::from_setting("right"), DockEdge::Right);
+        assert_eq!(DockEdge::from_setting(""), DockEdge::None);
+        assert_eq!(DockEdge::from_setting("top"), DockEdge::None);
+        assert_eq!(DockEdge::from_setting("RIGHT"), DockEdge::None, "регистр не угадываем");
     }
 
     #[test]

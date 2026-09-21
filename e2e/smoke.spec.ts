@@ -5008,6 +5008,34 @@ test("трекинг: пункт меню запускает, он же оста
   await expect(page.locator(".track")).toHaveCount(0);
 });
 
+// Прижатие окна быстрого ввода к краю. Работает только на Windows — Wayland не
+// даёт клиенту выбирать свою позицию (проверено на Hyprland: set_position
+// возвращает Ok, а окно остаётся там, где его поставил композитор), — поэтому
+// рядом с настройкой стоит прямая оговорка об этом.
+test("прижатие быстрого окна: по умолчанию по центру, выбор сохраняется", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Хоткеи" }).click();
+
+  const label = "Прижимать окно быстрого ввода к краю экрана";
+  const select = page.getByLabel(label);
+  await expect(select).toContainText("По центру");
+
+  // Оговорка про Wayland обязана стоять рядом: без неё настройка выглядит
+  // сломанной на той системе, где разработка и ведётся.
+  await expect(page.getByText("На Wayland не работает", { exact: false })).toBeVisible();
+
+  await select.click();
+  await page.getByRole("option", { name: "К правому краю" }).click();
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Хоткеи" }).click();
+  await expect(page.getByLabel(label)).toContainText("К правому краю");
+});
+
 test("фокус-режим: тумблер в настройках сохраняется и переживает перезагрузку", async ({ page }) => {
   await withMock(page);
   await page.goto("/");

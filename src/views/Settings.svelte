@@ -316,6 +316,7 @@
     show_subtasks_expanded: true,
     keybinds: "",
     global_keybinds: "",
+    quick_dock_edge: "",
     focus_mode_auto: true,
     track_domains: false,
     language: "",
@@ -1701,6 +1702,27 @@
     {/if}
  <p class="hint">{t("На Wayland (Hyprland, Sway) глобальные хоткеи перехватывает композитор — там их задают в его конфиге, биндом на запуск приложения с")}<code>--quick-task</code>, <code>--quick-note</code>,
       <code>--quick-clip</code>{t("или")}<code>--quick-pinned</code>.
+    </p>
+
+    <!-- Docking sits right after the Wayland note on purpose: it is the same
+         subject (what the compositor does and does not allow) and the same
+         limitation. Wayland gives a client no say in its own position, so the
+         select says so instead of silently doing nothing. -->
+    <label class="field">
+      <span>{t("Прижимать окно быстрого ввода к краю экрана")}</span>
+      <Select
+        value={settings.quick_dock_edge}
+        ariaLabel={t("Прижимать окно быстрого ввода к краю экрана")}
+        onChange={(v) => (settings!.quick_dock_edge = v)}
+        options={[
+          { value: "", label: t("По центру") },
+          { value: "left", label: t("К левому краю") },
+          { value: "right", label: t("К правому краю") },
+        ]}
+      />
+    </label>
+    <p class="hint">
+      {t("На Wayland не работает: композитор сам решает, где разместить окно, и приложение не может его подвинуть.")}
     </p>
 
     <h4 class="keybind-group">{t("В приложении")}</h4>

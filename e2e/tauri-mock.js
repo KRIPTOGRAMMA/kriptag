@@ -51,6 +51,7 @@
     show_subtasks_expanded: true,
     keybinds: "",
     global_keybinds: "",
+    quick_dock_edge: "",
     focus_mode_auto: true,
     track_domains: false,
     // v0.9.32: в e2e язык прибит к русскому намеренно. Тесты ищут элементы

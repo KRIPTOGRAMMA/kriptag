@@ -236,6 +236,7 @@ export interface AppSettings {
   // The same for global quick-capture hotkeys, under a separate key: they use a
   // different mechanism (OS-level registration) and a combination may fail to apply.
   global_keybinds: string;
+  quick_dock_edge: string;
   focus_mode_auto: boolean; // automatically pause notifications during pomodoro work or a time block
   track_domains: boolean; // breaking browser time down by site; off by default
   language: string; // "ru" | "en"; empty means detect from the system locale

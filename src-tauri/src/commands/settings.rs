@@ -108,6 +108,12 @@ pub struct AppSettings {
     // a local one cannot.
     #[serde(default)]
     pub global_keybinds: String,
+    // Which screen edge the quick window docks to: "none" | "left" | "right".
+    // Windows only in practice — Wayland does not let a client position itself
+    // (see DockEdge in lib.rs) — but stored everywhere so the value survives
+    // moving between machines.
+    #[serde(default)]
+    pub quick_dock_edge: String,
     #[serde(default = "default_true")]
     pub focus_mode_auto: bool,        // automatically pause notifications during pomodoro work or a time block
     // Breaking browser time down by site. OFF by default: it requires parsing
@@ -185,6 +191,7 @@ impl Default for AppSettings {
             show_subtasks_expanded: true,
             keybinds: String::new(),
             global_keybinds: String::new(),
+            quick_dock_edge: String::new(),
             focus_mode_auto: true,
             track_domains: false,
             language: String::new(),
@@ -311,6 +318,7 @@ pub async fn load_settings_raw(pool: &SqlitePool) -> AppResult<AppSettings> {
     if let Some(v) = get_setting(pool, "show_subtasks_expanded").await { s.show_subtasks_expanded = v != "false"; }
     if let Some(v) = get_setting(pool, "keybinds").await { s.keybinds = v; }
     if let Some(v) = get_setting(pool, "global_keybinds").await { s.global_keybinds = v; }
+    if let Some(v) = get_setting(pool, "quick_dock_edge").await { s.quick_dock_edge = v; }
     s.focus_mode_auto = get_bool_setting(pool, "focus_mode_auto", true).await;
     s.track_domains = get_bool_setting(pool, "track_domains", false).await;
     s.language = get_setting(pool, "language").await.unwrap_or_default();
@@ -414,6 +422,7 @@ pub async fn save_settings(
     set_setting(pool.inner(), "show_subtasks_expanded", if settings.show_subtasks_expanded { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "keybinds", &settings.keybinds).await?;
     set_setting(pool.inner(), "global_keybinds", &settings.global_keybinds).await?;
+    set_setting(pool.inner(), "quick_dock_edge", &settings.quick_dock_edge).await?;
     set_setting(pool.inner(), "focus_mode_auto", if settings.focus_mode_auto { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "track_domains", if settings.track_domains { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "language", &settings.language).await?;
@@ -513,6 +522,23 @@ mod db_tests {
             !s.offtrack_notifications,
             "любое значение кроме явного «true» оставляет уведомление выключенным"
         );
+    }
+
+    // The dock edge travels UI -> settings -> lib.rs::apply_dock. A value that
+    // does not survive the round trip means the select does nothing at all.
+    #[tokio::test]
+    async fn the_dock_edge_survives_the_round_trip() {
+        let pool = test_pool().await;
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert_eq!(s.quick_dock_edge, "", "по умолчанию окно не прижато");
+
+        set_setting(&pool, "quick_dock_edge", "right").await.unwrap();
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert_eq!(s.quick_dock_edge, "right");
+
+        // And the string the settings store is exactly what DockEdge parses:
+        // a mismatch here (say "Right" vs "right") would silently disable it.
+        assert_eq!(crate::DockEdge::from_setting(&s.quick_dock_edge), crate::DockEdge::Right);
     }
 
     #[tokio::test]

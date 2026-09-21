@@ -118,6 +118,12 @@ export const EN: Record<string, string> = {
   "История": "History",
   "Корзина": "Trash",
   "Список": "List",
+  "Прижимать окно быстрого ввода к краю экрана": "Dock the quick-capture window to a screen edge",
+  "По центру": "Centred",
+  "К левому краю": "To the left edge",
+  "К правому краю": "To the right edge",
+  "На Wayland не работает: композитор сам решает, где разместить окно, и приложение не может его подвинуть.":
+    "Does not work on Wayland: the compositor decides where a window goes, and the application cannot move it.",
   "Плитки": "Tiles",
   "Доска": "Board",
   "+ Новая": "+ New",
