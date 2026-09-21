@@ -3680,7 +3680,7 @@ test("таблицы в заметках: рендерится <table>, ячей
 // Второй вид заметок: сетка плиток на всю ширину вместо редактора. Панель
 // списка остаётся ради поиска и фильтров — ими же фильтруются плитки, — но
 // строки списка в ней скрыты, чтобы не дублировать сетку.
-test("плитки заметок: сетка показывает превью, клик открывает заметку и возвращает список", async ({ page }) => {
+test("плитки заметок: сетка показывает превью, клик открывает заметку во всю ширину", async ({ page }) => {
   await seedDb(page, {
     tasks: [], projects: [], settings: { onboarding_complete: true },
     notes: [
@@ -3715,6 +3715,14 @@ test("плитки заметок: сетка показывает превью,
   await expect(page.locator(".note-tile")).toHaveCount(0);
   await expect(page.locator(".editor-head")).toBeVisible();
 
+  // И открывается на ВСЮ ширину: панель списка уходит совсем. Раньше клик
+  // возвращал режим «Список», то есть ронял пользователя обратно в узкую
+  // раскладку, из которой он как раз ушёл ради чтения во всё окно.
+  await expect(page.locator(".list-pane")).toBeHidden();
+  // Режим по-прежнему «Плитки» — видно по кнопке возврата, которой в обычной
+  // раскладке нет. Сам переключатель проверить нельзя: он внутри скрытой панели.
+  await expect(page.getByTitle("К плиткам")).toBeVisible();
+
   const title = page.locator(".editor-head input").first();
   await expect(title).toHaveValue("Покупки");
   await expect(noteEditor(page)).toContainText("молоко и хлеб");
@@ -3727,6 +3735,35 @@ test("плитки заметок: сетка показывает превью,
   });
   expect(saved).toContainEqual(["n2", "молоко и хлеб"]);
   expect(saved).toContainEqual(["n1", "## Вступление\nПро **метрики** и [[Архитектуру]]."]);
+});
+
+// Из открытой во всю ширину заметки надо уметь вернуться к сетке — иначе
+// единственный выход был бы через переключатель вида.
+test("плитки заметок: из открытой заметки можно вернуться к сетке кнопкой и Escape", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [], projects: [], settings: { onboarding_complete: true },
+    notes: [
+      { id: "n1", title: "Идеи", content: "текст", tags: [], pinned: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: "n2", title: "Покупки", content: "молоко", tags: [], pinned: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    ],
+  });
+  await withMock(page);
+  await page.goto("/");
+  await page.locator(".nav").getByRole("button", { name: "Заметки" }).click();
+  await page.locator(".seg-list").getByRole("button", { name: "Плитки", exact: true }).click();
+
+  // Кнопкой.
+  await page.locator(".note-tile").first().click();
+  await expect(page.locator(".list-pane")).toBeHidden();
+  await page.getByTitle("К плиткам").click();
+  await expect(page.locator(".note-tile")).toHaveCount(2);
+  await expect(page.locator(".list-pane")).toBeVisible();
+
+  // Escape — то же самое.
+  await page.locator(".note-tile").first().click();
+  await expect(page.locator(".note-tile")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".note-tile")).toHaveCount(2);
 });
 
 // Выбор вида переживает перезапуск, как и режим Доска в Задачах.
@@ -7616,5 +7653,6 @@ test("состояние экранов: Корзина НЕ запоминае�
   // подвид, а не содержимое базы.
   await expect(page.locator(".task-row")).toHaveCount(3);
 });
+
 
 

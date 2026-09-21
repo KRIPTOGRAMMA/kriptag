@@ -125,6 +125,7 @@ export const EN: Record<string, string> = {
   "На Wayland не работает: композитор сам решает, где разместить окно, и приложение не может его подвинуть.":
     "Does not work on Wayland: the compositor decides where a window goes, and the application cannot move it.",
   "Плитки": "Tiles",
+  "К плиткам": "Back to tiles",
   "Доска": "Board",
   "+ Новая": "+ New",
   "Проекты": "Projects",

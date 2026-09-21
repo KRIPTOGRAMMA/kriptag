@@ -53,7 +53,21 @@
   // Tiles apply to the notes themselves only. Derived rather than checked in
   // three places, so the list pane, the grid and the editor cannot disagree
   // about which mode is showing.
-  const tilesMode = $derived(noteViewMode === "tiles" && listSubView === "notes" && !zenMode);
+  // A note opened from the grid stays in the tiles layout: shown full width with
+  // the list pane hidden, and closing it returns to the grid.
+  //
+  // The first version switched back to "list" instead, dropping the user into the
+  // narrow-pane layout they had deliberately left — the grid exists precisely to
+  // read a note with the whole window.
+  let tileNoteOpen = $state(false);
+
+  // Tiles apply to the notes themselves only. Derived rather than checked in
+  // three places, so the list pane, the grid and the editor cannot disagree
+  // about which mode is showing.
+  const tilesView = $derived(noteViewMode === "tiles" && listSubView === "notes" && !zenMode);
+  // The grid itself: not while one of its notes is open full width.
+  const tilesMode = $derived(tilesView && !tileNoteOpen);
+
 
   // A preview for a tile: the note's text without markdown noise, trimmed to a
   // few lines. Headings, emphasis and link syntax are stripped rather than
@@ -84,9 +98,22 @@
   // underneath.
   async function openFromTile(note: Note) {
     await selectNote(note);
-    // Back to the list: the grid is for choosing, the editor is for working.
-    noteViewMode = "list";
+    tileNoteOpen = true;
   }
+
+  function backToTiles() {
+    tileNoteOpen = false;
+  }
+
+  // The flag is only meaningful while the tiles view is on and a note is open.
+  // Without this it survives switching to the list (where it would hide the pane
+  // for no reason) and deleting the open note (leaving an empty full-width
+  // editor with a "back to tiles" button and nothing else).
+  $effect(() => {
+    if (noteViewMode !== "tiles" || listSubView !== "notes" || !selectedId) {
+      tileNoteOpen = false;
+    }
+  });
 
   const selected = $derived(noteStore.notes.find(n => n.id === selectedId) ?? null);
   const otherTitles = $derived(noteStore.notes.filter(n => n.id !== selectedId).map(n => n.title));
@@ -393,6 +420,13 @@
     }
     if (e.key === "Escape" && zenMode) {
       zenMode = false;
+      return;
+    }
+    // Checked AFTER zen: in zen mode Escape leaves zen, not the note. Otherwise
+    // one Escape would undo two states at once and the note would vanish from
+    // under the user.
+    if (e.key === "Escape" && tileNoteOpen) {
+      backToTiles();
       return;
     }
     onListKeydown(e);
@@ -901,7 +935,7 @@ ${bodyHtml}
 
 <svelte:window onkeydown={onZenKeydown} />
 
-<div class="notes card" class:tiles-mode={tilesMode}>
+<div class="notes card" class:tiles-mode={tilesView} class:tile-note={tileNoteOpen && tilesView}>
   <!-- The notes list -->
   <div class="list-pane">
     <div class="list-head">
@@ -1060,6 +1094,14 @@ ${bodyHtml}
       <div class="empty empty-editor">{t("Выберите заметку или создайте новую")}</div>
     {:else}
       <div class="editor-head">
+        <!-- Only when the note was opened from the grid: in the ordinary layout
+             the list is right there, so there is nothing to go back TO. Escape
+             does the same thing. -->
+        {#if tileNoteOpen && tilesView}
+          <button class="btn-icon" title={t("К плиткам")} onclick={backToTiles}>
+            <Icon name="columns" />
+          </button>
+        {/if}
         <input class="title-input" bind:value={editTitle} oninput={scheduleSave} placeholder={t("Название")} />
         {#if saving}
           <span class="muted" style="font-size:11px;">{t("Сохранение…")}</span>
@@ -1400,10 +1442,19 @@ ${bodyHtml}
     overflow: hidden;
   }
 
-  /* In tiles mode the pane keeps its head — the search box and the filters are
-     what the grid is filtered BY, so hiding them would leave no way to narrow it
-     — but the row list below is dropped: it would duplicate the grid. */
+  /* While the GRID is showing, the pane keeps its head — the search box and the
+     filters are what the grid is filtered BY, so hiding them would leave no way
+     to narrow it — but the row list below is dropped: it would duplicate the
+     grid. */
   .notes.tiles-mode .note-list {
+    display: none;
+  }
+
+  /* With a note open from the grid the pane goes entirely: there is no grid left
+     to filter, and the point of opening from tiles is to read with the whole
+     window. Leaving the pane would keep 210px of search box beside a note the
+     user asked to see full width. */
+  .notes.tile-note .list-pane {
     display: none;
   }
 
