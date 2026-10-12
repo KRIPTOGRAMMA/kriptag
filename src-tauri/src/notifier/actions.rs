@@ -208,11 +208,22 @@ pub fn show_with_actions(
     title: &str,
     body: &str,
     buttons: &[(NotificationAction, String)],
+    // Passed in rather than read here: this function is synchronous (it blocks
+    // waiting for a click) and the setting lives behind an async query. The
+    // caller already has the pool open.
+    sound: crate::notifier::sound::NotifySound,
 ) -> bool {
     use tauri::Emitter;
 
     let mut notification = notify_rust::Notification::new();
     notification.summary(title).body(body);
+    // This path talks to notify_rust directly, so unlike the plugin it can
+    // honour "silent" — the hint the plugin never forwards.
+    if sound.is_silent() {
+        notification.hint(notify_rust::Hint::SuppressSound(true));
+    } else if let Some(name) = sound.platform_name() {
+        notification.hint(notify_rust::Hint::SoundName(name.to_string()));
+    }
     for (action, label) in buttons {
         notification.action(id_for_action(*action), label);
     }

@@ -52,6 +52,7 @@
     keybinds: "",
     global_keybinds: "",
     quick_dock_edge: "",
+    notify_sound: "",
     focus_mode_auto: true,
     track_domains: false,
     // v0.9.32: в e2e язык прибит к русскому намеренно. Тесты ищут элементы
@@ -166,6 +167,9 @@
     get_tracking_source: () => null,
     get_window_tracking: () => db.windowTracking ?? null,
     record_input: () => {},
+    // Предпрослушивание звука: в моке шуметь нечем, но команда должна
+    // существовать — иначе страж every_registered_command_is_mocked упадёт.
+    preview_notify_sound: () => {},
     open_quick_capture: ({ mode }) => {
       db.quickMode = mode;
       persist();

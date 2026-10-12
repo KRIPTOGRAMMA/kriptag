@@ -114,6 +114,11 @@ pub struct AppSettings {
     // moving between machines.
     #[serde(default)]
     pub quick_dock_edge: String,
+    // Which sound notifications ask the system to play: our own key
+    // ("system" | "silent" | "bell" | "alarm" | "message"), translated to a
+    // platform name at send time — see notifier/sound.rs.
+    #[serde(default)]
+    pub notify_sound: String,
     #[serde(default = "default_true")]
     pub focus_mode_auto: bool,        // automatically pause notifications during pomodoro work or a time block
     // Breaking browser time down by site. OFF by default: it requires parsing
@@ -192,6 +197,7 @@ impl Default for AppSettings {
             keybinds: String::new(),
             global_keybinds: String::new(),
             quick_dock_edge: String::new(),
+            notify_sound: String::new(),
             focus_mode_auto: true,
             track_domains: false,
             language: String::new(),
@@ -319,6 +325,7 @@ pub async fn load_settings_raw(pool: &SqlitePool) -> AppResult<AppSettings> {
     if let Some(v) = get_setting(pool, "keybinds").await { s.keybinds = v; }
     if let Some(v) = get_setting(pool, "global_keybinds").await { s.global_keybinds = v; }
     if let Some(v) = get_setting(pool, "quick_dock_edge").await { s.quick_dock_edge = v; }
+    if let Some(v) = get_setting(pool, "notify_sound").await { s.notify_sound = v; }
     s.focus_mode_auto = get_bool_setting(pool, "focus_mode_auto", true).await;
     s.track_domains = get_bool_setting(pool, "track_domains", false).await;
     s.language = get_setting(pool, "language").await.unwrap_or_default();
@@ -423,6 +430,7 @@ pub async fn save_settings(
     set_setting(pool.inner(), "keybinds", &settings.keybinds).await?;
     set_setting(pool.inner(), "global_keybinds", &settings.global_keybinds).await?;
     set_setting(pool.inner(), "quick_dock_edge", &settings.quick_dock_edge).await?;
+    set_setting(pool.inner(), "notify_sound", &settings.notify_sound).await?;
     set_setting(pool.inner(), "focus_mode_auto", if settings.focus_mode_auto { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "track_domains", if settings.track_domains { "true" } else { "false" }).await?;
     set_setting(pool.inner(), "language", &settings.language).await?;
@@ -526,6 +534,33 @@ mod db_tests {
 
     // The dock edge travels UI -> settings -> lib.rs::apply_dock. A value that
     // does not survive the round trip means the select does nothing at all.
+    // The stored value is our own key, and notifier/sound.rs has to agree with
+    // it: a mismatch would leave the picker working and the sound unchanged.
+    #[tokio::test]
+    async fn the_notification_sound_survives_the_round_trip() {
+        use crate::notifier::sound::NotifySound;
+        let pool = test_pool().await;
+        let s = load_settings_raw(&pool).await.unwrap();
+        assert_eq!(s.notify_sound, "", "по умолчанию системный звук");
+        assert_eq!(NotifySound::from_setting(&s.notify_sound), NotifySound::System);
+
+        for (key, expected) in [
+            ("bell", NotifySound::Bell),
+            ("alarm", NotifySound::Alarm),
+            ("message", NotifySound::Message),
+            ("silent", NotifySound::Silent),
+        ] {
+            set_setting(&pool, "notify_sound", key).await.unwrap();
+            let s = load_settings_raw(&pool).await.unwrap();
+            assert_eq!(s.notify_sound, key);
+            assert_eq!(
+                NotifySound::from_setting(&s.notify_sound),
+                expected,
+                "ключ «{key}» из настроек должен разбираться модулем звука"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_dock_edge_survives_the_round_trip() {
         let pool = test_pool().await;

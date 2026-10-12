@@ -253,6 +253,7 @@ pub async fn send_note_reminder(
                 (NotificationAction::NoteDone, crate::i18n::tr("Готово", lang).to_string()),
                 (NotificationAction::NoteSnoozeHour, crate::i18n::tr("Отложить на час", lang).to_string()),
             ],
+            chosen_sound(pool).await,
         )
     };
     #[cfg(not(target_os = "linux"))]
@@ -749,6 +750,15 @@ async fn morning_digest_due(pool: &SqlitePool, now: chrono::DateTime<Utc>) -> bo
 // plugin keeps no history of its own. Most calls lead nowhere in particular when
 // clicked in the feed, so their entity_type/entity_id stay NULL (see
 // send_notification_for).
+/// The sound the user picked, for whichever path is about to show a notification.
+async fn chosen_sound(pool: &SqlitePool) -> crate::notifier::sound::NotifySound {
+    crate::notifier::sound::NotifySound::from_setting(
+        &crate::commands::settings::get_setting(pool, "notify_sound")
+            .await
+            .unwrap_or_default(),
+    )
+}
+
 pub async fn send_notification(app: &tauri::AppHandle, pool: &SqlitePool, kind: &str, title: &str, body: &str) {
     send_notification_for(app, pool, kind, title, body, None, None).await;
 }
@@ -798,6 +808,7 @@ pub async fn send_pomodoro_notification(
         ));
         crate::notifier::actions::show_with_actions(
             app.clone(), pool.clone(), ActionTarget::Pomodoro, title, body, &buttons,
+            chosen_sound(pool).await,
         )
     };
     #[cfg(not(target_os = "linux"))]
@@ -842,6 +853,7 @@ pub async fn send_deadline_notification(
                 (NotificationAction::TaskDone, crate::i18n::tr("Выполнено", lang).to_string()),
                 (NotificationAction::TaskSnoozeHour, crate::i18n::tr("Отложить на час", lang).to_string()),
             ],
+            chosen_sound(pool).await,
         )
     };
     #[cfg(not(target_os = "linux"))]
@@ -890,11 +902,19 @@ pub async fn send_notification_for(
     entity_type: Option<&str>,
     entity_id: Option<&str>,
 ) {
-    let _ = app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    // Read per notification rather than cached: changing it in the settings
+    // should apply to the next one, not after a restart.
+    let sound = chosen_sound(pool).await;
+
+    let mut builder = app.notification().builder().title(title).body(body);
+    if let Some(name) = sound.platform_name() {
+        builder = builder.sound(name);
+    }
+    // "Silent" cannot be honoured on this path: suppressing sound needs a hint
+    // (Linux) or an explicit empty sound (Windows), and the plugin passes
+    // neither — its builder only forwards a sound NAME. Saying so in the UI is
+    // the honest option; silently doing nothing is not.
+    let _ = builder.show();
     let _ = sqlx::query(
         "INSERT INTO notification_log (id, kind, title, body, created_at, entity_type, entity_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )

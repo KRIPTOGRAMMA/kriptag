@@ -5049,6 +5049,35 @@ test("трекинг: пункт меню запускает, он же оста
 // даёт клиенту выбирать свою позицию (проверено на Hyprland: set_position
 // возвращает Ok, а окно остаётся там, где его поставил композитор), — поэтому
 // рядом с настройкой стоит прямая оговорка об этом.
+// Звук уведомлений — ИМЯ, а не файл: своего .ogg не передать ни на Windows
+// (пять фиксированных имён), ни на macOS, поэтому в настройках выбор из
+// системных, а хранится наш ключ, переводимый per-platform.
+test("звук уведомлений: по умолчанию системный, выбор сохраняется, «без звука» оговорено", async ({ page }) => {
+  await withMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+
+  const select = page.getByLabel("Звук уведомлений");
+  await expect(select).toContainText("Системный");
+  // Оговорки про «без звука» пока быть не должно — она только для silent.
+  await expect(page.getByText("«Без звука» действует только", { exact: false })).toHaveCount(0);
+
+  await select.click();
+  await page.getByRole("option", { name: "Будильник" }).click();
+  await waitSettingsSaved(page);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".settings-tab", { hasText: "Уведомления" }).click();
+  await expect(page.getByLabel("Звук уведомлений")).toContainText("Будильник");
+
+  // «Без звука» работает не везде, и об этом сказано прямо.
+  await page.getByLabel("Звук уведомлений").click();
+  await page.getByRole("option", { name: "Без звука" }).click();
+  await expect(page.getByText("«Без звука» действует только", { exact: false })).toBeVisible();
+});
+
 test("прижатие быстрого окна: по умолчанию по центру, выбор сохраняется", async ({ page }) => {
   await withMock(page);
   await page.goto("/");

@@ -317,6 +317,7 @@
     keybinds: "",
     global_keybinds: "",
     quick_dock_edge: "",
+    notify_sound: "",
     focus_mode_auto: true,
     track_domains: false,
     language: "",
@@ -1570,6 +1571,36 @@
     </div>
     <label class="check" style="margin-top:10px;">
       <Switch bind:checked={settings.context_notifications} />{t("Контекстные уведомления (накопились просрочки, возврат к задаче «в работе»)")}</label>
+
+    <!-- A name, never a file: every backend takes one (Windows accepts exactly
+         five, macOS a system name, Linux a themed name), so a bundled sound
+         could not be played through the notification API anywhere. Our own key
+         is stored and translated per platform — see notifier/sound.rs. -->
+    <label class="field">
+      <span>{t("Звук уведомлений")}</span>
+      <Select
+        value={settings.notify_sound}
+        ariaLabel={t("Звук уведомлений")}
+        onChange={(v) => (settings!.notify_sound = v)}
+        options={[
+          { value: "", label: t("Системный") },
+          { value: "bell", label: t("Колокольчик") },
+          { value: "alarm", label: t("Будильник") },
+          { value: "message", label: t("Сообщение") },
+          { value: "silent", label: t("Без звука") },
+        ]}
+      />
+    </label>
+    <div class="field">
+      <button class="btn-sm" onclick={() => api.previewNotifySound(settings!.notify_sound)}>
+        {t("Прослушать")}
+      </button>
+    </div>
+    {#if settings.notify_sound === "silent"}
+      <p class="hint">
+        {t("«Без звука» действует только на уведомления с кнопками (Linux): остальные показывает системный плагин, а он не умеет глушить звук.")}
+      </p>
+    {/if}
 
     <!-- Off by default: this is the only notification that judges what the user
          is doing right now, so it has to be asked for. It needs app rules to

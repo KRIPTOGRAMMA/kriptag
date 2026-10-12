@@ -593,6 +593,7 @@ pub fn run() {
                         commands::note_links::ai_suggest_links,
                         commands::settings::get_settings,
                         commands::settings::save_settings,
+                        notifier::sound::preview_notify_sound,
                         commands::backup::export,
                         commands::backup::import,
                         commands::backup::preview_import,
