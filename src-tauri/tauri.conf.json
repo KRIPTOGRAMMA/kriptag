@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "kriptag",
+  "productName": "Kriptag",
   "version": "0.6.0",
   "identifier": "com.kriptag.app",
   "build": {

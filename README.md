@@ -17,7 +17,7 @@ Requires Node 20+ and a Rust toolchain.
 
 ```sh
 npm ci
-node scripts/fetch-sidecars.mjs   # see "Sidecars" below
+npm run sidecars                  # see "Sidecars" below
 npm run tauri dev                 # development
 npx tauri build                   # installers in src-tauri/target/release/bundle/
 ```
@@ -43,6 +43,21 @@ llamafile alone is ~300 MB. `scripts/fetch-sidecars.mjs` downloads what it can:
 
 A missing sidecar makes the bundler fail on purpose rather than silently ship a
 broken package.
+
+### AppImage
+
+`npx tauri build --bundles appimage` does not finish on distributions whose
+libraries use the newer `.relr.dyn` relocation section (Arch, recent Fedora):
+linuxdeploy carries its own 2024-era `strip`, which stops on it. Use
+
+```sh
+./scripts/build-appimage.sh
+```
+
+It sets `NO_STRIP=1` (skipping that strip — the system one handles the same
+files fine) and finishes the packaging step itself, because the bundler's own
+invocation of linuxdeploy fails without reporting why while the AppDir it
+produces is perfectly good. `deb` is unaffected and builds normally.
 
 ## Releases
 
