@@ -222,27 +222,40 @@ fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
 /// Every failure here is ignored on purpose: docking is a convenience, and a
 /// window that opens centred is a working window. Never fall back to some other
 /// position — that would move the window somewhere the user did not ask for.
+/// Reads the setting on the async runtime, NOT with block_on.
+///
+/// `block_on` here crashed the whole application (v0.10.38 → fixed in v0.10.44):
+/// show_quick_capture runs on a thread that is already driving async tasks, and
+/// tokio panics outright — "Cannot start a runtime from within a runtime". Every
+/// quick-capture hotkey killed the process, whether or not docking was even
+/// configured, because the blocking read happened before the setting was looked
+/// at.
+///
+/// Spawning is also the honest shape: the window is already visible by now, so
+/// nothing is waiting on this. Moving it a moment later is what docking is.
 fn apply_dock(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
-    let Some(pool) = app.try_state::<sqlx::SqlitePool>() else { return };
-    let edge = tauri::async_runtime::block_on(async {
-        commands::settings::get_setting(&pool, "quick_dock_edge")
+    let app = app.clone();
+    let w = w.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(pool) = app.try_state::<sqlx::SqlitePool>() else { return };
+        let edge = commands::settings::get_setting(&pool, "quick_dock_edge")
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let edge = DockEdge::from_setting(&edge);
+        if edge == DockEdge::None {
+            return;
+        }
+
+        let Ok(Some(monitor)) = w.current_monitor() else { return };
+        let scale = monitor.scale_factor();
+        let work = monitor.size().to_logical::<f64>(scale);
+        let Ok(size) = w.outer_size() else { return };
+        let win = size.to_logical::<f64>(scale);
+
+        if let Some((x, y)) = dock_position(edge, work.width, work.height, win.width, win.height) {
+            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+        }
     });
-    let edge = DockEdge::from_setting(&edge);
-    if edge == DockEdge::None {
-        return;
-    }
-
-    let Ok(Some(monitor)) = w.current_monitor() else { return };
-    let scale = monitor.scale_factor();
-    let work = monitor.size().to_logical::<f64>(scale);
-    let Ok(size) = w.outer_size() else { return };
-    let win = size.to_logical::<f64>(scale);
-
-    if let Some((x, y)) = dock_position(edge, work.width, work.height, win.width, win.height) {
-        let _ = w.set_position(tauri::LogicalPosition::new(x, y));
-    }
 }
 
 #[tauri::command]
@@ -1050,6 +1063,55 @@ mod tests {
     //
     // A positive check, not "does not contain false": a literal is trivially
     // hoisted into a variable two lines up, and the negative form would pass.
+    // v0.10.38 put `block_on` into apply_dock, which show_quick_capture calls.
+    // That function runs on a thread already driving async tasks, so tokio
+    // panicked outright — "Cannot start a runtime from within a runtime" — and
+    // the whole application died on EVERY quick-capture hotkey. Worse, the
+    // blocking read happened before the setting was even looked at, so it killed
+    // the app for users who had never turned docking on.
+    //
+    // The guard is on the SUBJECT, not on one function: anything reachable from
+    // a window/hotkey handler must not block the runtime. If a future caller
+    // needs a setting there, it spawns.
+    #[test]
+    fn nothing_in_the_quick_capture_path_blocks_the_runtime() {
+        let src = production_src();
+
+        // The call chain this covers, so a rename does not silently narrow it.
+        for f in ["fn show_quick_capture", "fn apply_dock"] {
+            assert!(src.contains(f), "{f} исчезла — страж перестал что-либо охранять");
+        }
+
+        // Comments are allowed to mention it — this file explains the bug at
+        // length. Only CALLS count, so the lines are filtered first.
+        let calls: Vec<&str> = src
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && !l.starts_with("///"))
+            .filter(|l| l.contains("block_on"))
+            .collect();
+
+        // One call is legitimate and required: the one in `run()` that CREATES
+        // the runtime. It is what makes every other thread a runtime thread,
+        // which is exactly why a second one is a crash.
+        assert_eq!(
+            calls.len(),
+            1,
+            "ожидался ровно один вызов block_on — тот, что создаёт рантайм в \
+             run(). Найдено {}: {calls:?}. Любой другой стоит на потоке, который \
+             уже крутит async-задачи (так работают обработчики окна и хоткеев), \
+             и tokio паникует, убивая приложение целиком — именно это сломало \
+             быстрый ввод в v0.10.38. Нужна настройка в таком месте — `spawn`.",
+            calls.len()
+        );
+        assert!(
+            calls[0].starts_with(".block_on("),
+            "единственный block_on должен быть звеном построения рантайма \
+             (`.block_on(async {{ … }})` после Builder), получено: {}",
+            calls[0]
+        );
+    }
+
     #[test]
     fn the_activity_loop_is_told_what_the_tracking_mode_really_is() {
         let src = production_src();
