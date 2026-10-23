@@ -88,3 +88,9 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 # via winit. The extension is optional and really is absent sometimes — verified
 # on Xwayland — so the module checks for it instead of trusting the reply.
 x11rb = { version = "0.13", features = ["screensaver"] }
+
+# Debug info only for our own crate: full debug info for ~400 dependencies
+# made target/debug grow past 60 GB. Backtraces and breakpoints in our code
+# still work; stepping into dependency internals does not.
+[profile.dev.package."*"]
+debug = false
