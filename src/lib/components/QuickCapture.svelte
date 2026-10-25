@@ -421,6 +421,23 @@
   // startDragging on mousedown rather than data-tauri-drag-region, for the reason
   // WindowControls already records: the attribute fires for clicks on nested
   // elements too, so a click on a tab or a button would become a micro-drag.
+  // Collapsed-to-a-tab state. Driven by what the backend REPORTS, never by what
+  // we asked for: on Wayland the resize silently does not happen, and a UI that
+  // assumed success would draw a tab over a full-size window.
+  let collapsed = $state(false);
+  // Whether collapsing is possible at all here. Unknown until the first attempt,
+  // so the control is offered and hides itself if the attempt changes nothing —
+  // better than hiding a working feature behind a guess about the platform.
+  let tabPossible = $state(true);
+
+  async function toggleTab() {
+    const want = !collapsed;
+    const got = await api.toggleQuickTab(want).catch(() => false);
+    collapsed = got;
+    // Asked to collapse and nothing happened: this platform cannot do it.
+    if (want && !got) tabPossible = false;
+  }
+
   async function startDrag(e: MouseEvent) {
     // Primary button only: a right click belongs to the window manager.
     if (e.button !== 0) return;
@@ -439,11 +456,28 @@
 
 <svelte:window onkeydown={onKeydown} />
 
+{#if collapsed}
+  <!-- Collapsed: the window is a 28px tab, far too narrow for the form or for
+       the buttons above. The whole surface is the control — clicking anywhere on
+       it expands the window back. -->
+  <button class="quick-tab" title={t("Развернуть из язычка")} onclick={toggleTab}>
+    <Icon name="expand" />
+  </button>
+{:else}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="container" onmousedown={startDrag}>
   <!-- Escape still does everything this does, including flushing a deferred
        checklist edit — cancel() is the same path. The button exists because with
        no system title bar there was no way to close the window with the mouse. -->
+  {#if tabPossible}
+    <!-- Collapses the window to a tab at its docked edge. Only shown while that
+         looks possible: with no edge configured, or on a platform that ignores
+         the resize, the first attempt reports failure and the control goes away
+         rather than sitting there doing nothing. -->
+    <button class="quick-tab-btn btn-icon" title={collapsed ? t("Развернуть из язычка") : t("Свернуть к краю")} onclick={toggleTab}>
+      <Icon name={collapsed ? "expand" : "collapse"} />
+    </button>
+  {/if}
   <button class="quick-close btn-icon" title={t("Закрыть")} onclick={cancel}>
     <Icon name="x" />
   </button>
@@ -474,14 +508,17 @@
     {#if pinned}
       <div class="pin-head">
         <span class="pin-badge">⚡ {pinned.kind === "task" ? t("Задача") : t("Заметка")}</span>
-        {#if saved}<span class="pin-saved">{t("Сохранено")}</span>{/if}
       </div>
       <!-- svelte-ignore a11y_autofocus -->
       <input class="pin-title" bind:value={pinnedTitle} placeholder={t("Заголовок...")}
         oninput={() => saved = false} />
-      <div class="field-with-voice">
+      <div class="field-with-voice pin-field">
+        <!-- No `rows`: a fixed row count sizes the field to the text instead of to
+             the window, which left a third of a 340px window empty below the
+             buttons. The wrapper takes the leftover height (as .desc-field does
+             in the creation modes) and the textarea fills it. -->
         <textarea class="pin-text" bind:this={pinnedTextEl} bind:value={pinnedText} placeholder={t("Текст... (Ctrl+Enter — сохранить)")}
-          rows={pinned.kind === "task" ? 3 : 6} autofocus oninput={() => saved = false}></textarea>
+          autofocus oninput={() => saved = false}></textarea>
         <VoiceButton onText={(text) => {
           if (!pinnedTextEl) return;
           pinnedText = insertIntoTextarea(pinnedTextEl, pinnedText, text);
@@ -505,7 +542,13 @@
         </div>
       {/if}
 
-      <div class="buttons">
+      <!-- The same footer band the creation modes use: it spans the full width,
+           separating "what the thing is" above from the actions below. The slot
+           used to put its buttons straight on the background, which is part of
+           what made it look like an older screen. -->
+      <div class="footer">
+        {#if saved}<span class="pin-saved">{t("Сохранено")}</span>{/if}
+        <span class="tabs-spacer"></span>
         <button class="btn-ghost" onclick={cancel}>{t("Закрыть")}</button>
         <button class="btn-primary" onclick={savePinned} disabled={busy || !pinnedTitle.trim()}>
           {t("Сохранить")}
@@ -598,6 +641,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .container {
@@ -655,6 +699,37 @@
      three different layouts (task, note, pinned) and only one of them has a
      header row to put this in. position: absolute keeps it in the same place in
      all three. */
+  /* The collapsed tab: the entire window. No padding to fight over, and the
+     icon centred, because at 28px wide there is room for nothing else. */
+  .quick-tab {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+  }
+  .quick-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  /* Left of the close button, same corner. */
+  .quick-tab-btn {
+    position: absolute;
+    top: 6px;
+    right: 30px;
+    z-index: 2;
+    color: var(--text-secondary);
+  }
+  .quick-tab-btn:hover {
+    color: var(--text-primary);
+  }
+
   .quick-close {
     position: absolute;
     top: 6px;
@@ -703,6 +778,15 @@
     flex: 1;
     min-height: 0;
     margin-top: 10px;
+  }
+
+  /* The slot's text field, same rule as .desc-field above: the quick window is a
+     fixed 340px tall, so whatever does not claim the leftover height leaves a
+     gap under the buttons. */
+  .pin-field {
+    flex: 1;
+    min-height: 0;
+    margin-top: 8px;
   }
   .desc-input {
     flex: 1;
@@ -797,14 +881,44 @@
     color: var(--text-secondary);
     margin-left: auto;
   }
+  /* Same shape as .lead-input in the creation modes: borderless and larger than
+     the body text. The slot used to be a form of bordered fields while the rest
+     of the window was a sheet you write on — that mismatch is what read as an
+     older design. */
   .pin-title {
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-size: 17px;
     font-weight: 600;
+    line-height: 1.3;
   }
+  .pin-title:focus {
+    outline: none;
+    border-color: transparent;
+  }
+  .pin-title::placeholder {
+    color: var(--text-secondary);
+    font-weight: 400;
+  }
+  /* Borderless like .desc-input, but keeping the accent rule on the left: that
+     stripe is what says "this is an existing thing being edited", as opposed to
+     the blank sheet the creation modes offer. */
   .pin-text {
     flex: 1;
+    min-height: 0;
     resize: none;
-    font-size: 13px;
+    border: none;
     border-left: 2px solid var(--accent);
+    border-radius: 0;
+    background: transparent;
+    padding: 0 0 0 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .pin-text:focus {
+    outline: none;
+    color: var(--text-primary);
   }
   /* The checklist in the slot, separated from the text by a heading with a
      counter — without it the two groups of fields merge into one wall. */

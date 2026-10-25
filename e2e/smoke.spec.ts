@@ -5683,19 +5683,26 @@ test("логотип: KRIPTAG набран вшитым гротеском, а �
       family: getComputedStyle(el).fontFamily,
       loaded: (document as { fonts: FontFaceSet }).fonts.check('700 15px "Kriptag Wordmark"'),
       wordmark: measure('"Kriptag Wordmark"'),
-      system: measure("system-ui"),
+      // The baseline is what the browser draws when the named face is ABSENT —
+      // its own last-resort default. "system-ui" was the baseline until the
+      // system fonts changed under it (2026-10-22: system-ui began resolving to
+      // Noto Sans, 63.5 against the wordmark's 62) and the test started failing
+      // on a difference of 1.5 while the wordmark was loading perfectly. A
+      // deliberately missing family cannot drift that way.
+      fallback: measure('"NoSuchFontDeliberately"'),
     };
   });
 
   expect(font.family, "логотип не ссылается на вшитый шрифт").toContain("Kriptag Wordmark");
   expect(font.loaded, "шрифт логотипа не загрузился").toBe(true);
-  // Собственно доказательство, что это не откат на системный шрифт. Не строгое
-  // неравенство, а заметный отрыв: подменив @font-face на системную гарнитуру,
-  // я получил 68 против 68.21 — формально «разные», и проверка на !== молча
-  // прошла. Настоящий гротеск уже 62 против 68.21, то есть отрыв больше 4px.
+  // Собственно доказательство, что это не откат. Не строгое неравенство, а
+  // заметный отрыв: подменив @font-face на системную гарнитуру, я получил 68
+  // против 68.21 — формально «разные», и проверка на !== молча прошла.
+  // Сравнение идёт с ОТСУТСТВУЮЩИМ шрифтом (68.89), а не с system-ui: тот
+  // меняется вместе с системными шрифтами и однажды сам подъехал вплотную.
   expect(
-    Math.abs(font.wordmark - font.system),
-    `надпись мерится почти как системным шрифтом (${font.wordmark} против ${font.system}) — похоже на откат`,
+    Math.abs(font.wordmark - font.fallback),
+    `надпись мерится как без вшитого шрифта (${font.wordmark} против ${font.fallback}) — похоже на откат`,
   ).toBeGreaterThan(3);
 });
 
@@ -6044,6 +6051,85 @@ test("канбан: своя колонка добавляется на доск
 // v0.9.33: быстрый слот (Ctrl+Shift+J) — одна закреплённая задача или заметка,
 // которую хоткей открывает сразу на правку текста. В отличие от остальных
 // режимов quick-window.html этот ничего не создаёт, а меняет существующее.
+// Слот выглядел как форма из полей в рамках, тогда как остальные режимы того же
+// окна — чистый лист: заголовок крупным шрифтом, текст без коробки, кнопки на
+// плашке-футере. Пользователь назвал это «старым дизайном» (v0.10.47).
+// Проверяется вычисленным стилем, а не именами классов.
+test("быстрый слот: поля без рамок и футер, как в режимах создания", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [], projects: [],
+    notes: [{
+      id: "n1", title: "Закреплённая", content: "текст",
+      tags: [], pinned: false,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }],
+    quickMode: "pinned", pinnedKind: "note", pinnedId: "n1",
+  });
+  await withMock(page);
+  await page.setViewportSize({ width: 480, height: 340 });
+  await page.goto("/quick-window.html");
+
+  const title = await page.locator(".pin-title").evaluate(el => {
+    const cs = getComputedStyle(el);
+    return { top: cs.borderTopWidth, size: parseFloat(cs.fontSize) };
+  });
+  expect(title.top, "заголовок слота должен быть без рамки, как .lead-input").toBe("0px");
+  expect(title.size, "и крупнее основного текста").toBeGreaterThanOrEqual(16);
+
+  // Текст без коробки, но с акцентной полосой слева: она отличает «правлю
+  // существующее» от чистого листа создания, поэтому проверяется отдельно.
+  const text = await page.locator(".pin-text").evaluate(el => {
+    const cs = getComputedStyle(el);
+    return { top: cs.borderTopWidth, left: parseFloat(cs.borderLeftWidth) };
+  });
+  expect(text.top, "у текста слота не должно быть рамки сверху").toBe("0px");
+  expect(text.left, "акцентная полоса слева остаётся").toBeGreaterThan(0);
+
+  // Кнопки на плашке, а не прямо на фоне.
+  await expect(page.locator(".footer")).toBeVisible();
+  const footerBg = await page.locator(".footer").evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(footerBg, "футер должен иметь свой фон").not.toBe("rgba(0, 0, 0, 0)");
+});
+
+// Окно быстрого ввода — фиксированные 340px. Всё, что не забирает остаток
+// высоты, оставляет пустоту: у слота textarea имела жёсткий `rows`, и под
+// кнопками зияла треть окна (v0.10.45). Проверяется фактической раскладкой, а
+// не классами: именно она и была неверной при зелёных тестах.
+test("быстрый слот: поле текста занимает окно, под кнопками нет пустоты", async ({ page }) => {
+  await seedDb(page, {
+    tasks: [], projects: [],
+    notes: [{
+      id: "n1", title: "Закреплённая", content: "короткий текст",
+      tags: [], pinned: false,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }],
+    quickMode: "pinned", pinnedKind: "note", pinnedId: "n1",
+  });
+  await withMock(page);
+  await page.setViewportSize({ width: 480, height: 340 });
+  await page.goto("/quick-window.html");
+
+  await expect(page.locator(".pin-text")).toBeVisible();
+
+  const gap = await page.evaluate(() => {
+    // .footer since v0.10.47: the slot's buttons moved onto the same band the
+    // creation modes use.
+    const buttons = document.querySelector(".footer") as HTMLElement;
+    const container = document.querySelector(".container") as HTMLElement;
+    return Math.round(container.getBoundingClientRect().bottom - buttons.getBoundingClientRect().bottom);
+  });
+  // Немного отступа снизу — нормально; треть окна — это и есть жалоба.
+  expect(gap, "под кнопками осталась пустота — поле текста не забрало высоту").toBeLessThan(40);
+
+  // И текстовое поле действительно растянуто, а не просто прижато к низу.
+  const share = await page.evaluate(() => {
+    const t = document.querySelector(".pin-text") as HTMLElement;
+    const c = document.querySelector(".container") as HTMLElement;
+    return t.getBoundingClientRect().height / c.getBoundingClientRect().height;
+  });
+  expect(share, "поле текста должно занимать заметную часть окна").toBeGreaterThan(0.4);
+});
+
 test("быстрый слот: открывает закреплённую задачу и сохраняет правку текста", async ({ page }) => {
   await seedDb(page, {
     tasks: [{
@@ -7682,6 +7768,7 @@ test("состояние экранов: Корзина НЕ запоминае�
   // подвид, а не содержимое базы.
   await expect(page.locator(".task-row")).toHaveCount(3);
 });
+
 
 
 

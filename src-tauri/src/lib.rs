@@ -200,6 +200,33 @@ pub fn dock_position(
     Some((x, y))
 }
 
+/// The quick window's two shapes when docked to an edge.
+///
+/// Collapsed it is a narrow tab at the screen edge; clicking it expands the
+/// window back. Windows-only, like docking itself: on Wayland a client cannot
+/// position or resize its own window at all (verified on Hyprland in v0.10.38,
+/// tauri#14913), so there is nothing a tab could attach itself to.
+///
+/// The full size is read from the window rather than hardcoded: it is declared
+/// once in tauri.conf.json and must not be duplicated here.
+pub const TAB_WIDTH: f64 = 28.0;
+pub const TAB_HEIGHT: f64 = 120.0;
+
+/// The size the window takes in each state, in logical pixels.
+///
+/// Pure so the arithmetic is testable: a tab wider than the window, or taller
+/// than the screen, is the kind of mistake that only shows up on a machine this
+/// code cannot run on.
+pub fn tab_size(collapsed: bool, full_w: f64, full_h: f64) -> (f64, f64) {
+    if collapsed {
+        // Never larger than the window it collapses from — on a small window a
+        // "tab" bigger than the thing itself is not a tab.
+        (TAB_WIDTH.min(full_w), TAB_HEIGHT.min(full_h))
+    } else {
+        (full_w, full_h)
+    }
+}
+
 // from the frontend and by the global hotkeys.
 fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
     let mode = normalize_quick_mode(mode);
@@ -256,6 +283,75 @@ fn apply_dock(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
             let _ = w.set_position(tauri::LogicalPosition::new(x, y));
         }
     });
+}
+
+/// Collapses the quick window to a tab at its docked edge, or expands it back.
+///
+/// Only meaningful when an edge is configured: with no edge the window sits
+/// centred and there is nothing to collapse towards, so this reports false and
+/// changes nothing. The frontend uses that to decide whether to offer the
+/// control at all.
+///
+/// Returns whether the window is collapsed AFTER the call, so the caller never
+/// has to guess — on Wayland the resize silently does not happen, and a UI that
+/// assumed success would show a collapsed tab over a full-size window.
+#[tauri::command]
+async fn toggle_quick_tab(app: tauri::AppHandle, collapsed: bool) -> bool {
+    let Some(w) = app.get_webview_window(QUICK_WINDOW_LABEL) else { return false };
+
+    let edge = match app.try_state::<sqlx::SqlitePool>() {
+        Some(pool) => DockEdge::from_setting(
+            &commands::settings::get_setting(&pool, "quick_dock_edge")
+                .await
+                .unwrap_or_default(),
+        ),
+        None => DockEdge::None,
+    };
+    if edge == DockEdge::None {
+        return false;
+    }
+
+    // The full size comes from the config, not from the live window: once
+    // collapsed, the window's own size IS the tab, so reading it would make
+    // expanding impossible.
+    let (full_w, full_h) = quick_window_full_size(&app);
+    let (w_px, h_px) = tab_size(collapsed, full_w, full_h);
+
+    if w.set_size(tauri::LogicalSize::new(w_px, h_px)).is_err() {
+        return false;
+    }
+
+    // Re-dock after resizing: the edge position depends on the width, so a
+    // collapsed window would otherwise sit where the full one used to start.
+    if let Ok(Some(monitor)) = w.current_monitor() {
+        let scale = monitor.scale_factor();
+        let work = monitor.size().to_logical::<f64>(scale);
+        if let Some((x, y)) = dock_position(edge, work.width, work.height, w_px, h_px) {
+            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+        }
+    }
+
+    // Report what actually happened rather than what was asked: on a platform
+    // that ignores the resize, this stays false and the UI does not lie.
+    match w.outer_size() {
+        Ok(size) => {
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let got = size.to_logical::<f64>(scale);
+            collapsed && (got.width - w_px).abs() < 2.0
+        }
+        Err(_) => false,
+    }
+}
+
+/// The quick window's configured size, as declared in tauri.conf.json.
+fn quick_window_full_size(app: &tauri::AppHandle) -> (f64, f64) {
+    app.config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == QUICK_WINDOW_LABEL)
+        .map(|w| (w.width, w.height))
+        .unwrap_or((480.0, 340.0))
 }
 
 #[tauri::command]
@@ -553,6 +649,7 @@ pub fn run() {
                         commands::pomodoro::pomodoro_stop,
                         commands::pomodoro::get_pomodoro_stats,
                         open_quick_capture,
+                        toggle_quick_tab,
                         read_clipboard_text,
                         get_quick_mode,
                         is_wayland,
@@ -1038,7 +1135,7 @@ pub fn run() {
 }
 #[cfg(test)]
 mod tests {
-    use super::{dock_position, is_autostart, normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins, DockEdge};
+    use super::{dock_position, tab_size, TAB_WIDTH, TAB_HEIGHT, is_autostart, normalize_quick_mode, quick_mode_from_args, quiet_check_id, quiet_remaining_mins, DockEdge};
     use chrono::{TimeZone, Utc};
 
     fn now() -> chrono::DateTime<Utc> {
@@ -1063,6 +1160,40 @@ mod tests {
     //
     // A positive check, not "does not contain false": a literal is trivially
     // hoisted into a variable two lines up, and the negative form would pass.
+    // The tab the docked window collapses into (v0.10.46). Windows-only, like
+    // docking itself, so the arithmetic is all that can be checked here — and it
+    // is the part that would put a tab off-screen or make it bigger than the
+    // window it came from.
+    #[test]
+    fn expanding_restores_the_configured_size() {
+        assert_eq!(tab_size(false, 480.0, 340.0), (480.0, 340.0));
+    }
+
+    #[test]
+    fn a_collapsed_window_is_a_narrow_tab() {
+        let (w, h) = tab_size(true, 480.0, 340.0);
+        assert_eq!((w, h), (TAB_WIDTH, TAB_HEIGHT));
+        assert!(w < 480.0 && h < 340.0, "язычок должен быть меньше окна");
+    }
+
+    // A "tab" wider or taller than the window it collapses from is not a tab.
+    #[test]
+    fn the_tab_never_exceeds_the_window_it_came_from() {
+        let (w, h) = tab_size(true, 20.0, 60.0);
+        assert_eq!((w, h), (20.0, 60.0), "на крошечном окне язычок — это всё окно");
+    }
+
+    // The tab sits flush against its edge, like the full window does: the same
+    // dock_position does both, so the right edge must subtract the TAB width,
+    // not the window width.
+    #[test]
+    fn the_tab_hugs_the_right_edge_by_its_own_width() {
+        let (w, h) = tab_size(true, 480.0, 340.0);
+        let (x, _) = dock_position(DockEdge::Right, 1536.0, 864.0, w, h).unwrap();
+        assert_eq!(x + w, 1536.0, "правый край язычка совпадает с краем экрана");
+        assert!(x > 1536.0 - 480.0, "язычок должен стоять правее, чем полное окно");
+    }
+
     // v0.10.38 put `block_on` into apply_dock, which show_quick_capture calls.
     // That function runs on a thread already driving async tasks, so tokio
     // panicked outright — "Cannot start a runtime from within a runtime" — and

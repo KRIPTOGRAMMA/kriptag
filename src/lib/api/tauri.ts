@@ -55,6 +55,7 @@ export const api = {
     invoke<number>("rename_note_links", { oldTitle, newTitle }),
   aiSuggestLinks: (noteId: string) => invoke<void>("ai_suggest_links", { noteId }),
   previewNotifySound: (sound: string) => invoke<void>("preview_notify_sound", { sound }),
+  toggleQuickTab: (collapsed: boolean) => invoke<boolean>("toggle_quick_tab", { collapsed }),
   aiEditSelection: (requestId: string, text: string, mode: string) =>
     invoke<void>("ai_edit_selection", { requestId, text, mode }),
   aiSummarizeNote: (requestId: string, text: string) => invoke<void>("ai_summarize_note", { requestId, text }),
