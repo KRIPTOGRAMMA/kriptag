@@ -464,23 +464,25 @@
     <Icon name="expand" />
   </button>
 {:else}
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="container" onmousedown={startDrag}>
-  <!-- Escape still does everything this does, including flushing a deferred
-       checklist edit — cancel() is the same path. The button exists because with
-       no system title bar there was no way to close the window with the mouse. -->
+{#snippet collapseBtn()}
+  <!-- Collapses the window to a tab at its docked edge. Only shown while that
+       looks possible: with no edge configured, or on a platform that ignores the
+       resize, the first attempt reports failure and the control goes away rather
+       than sitting there doing nothing. -->
   {#if tabPossible}
-    <!-- Collapses the window to a tab at its docked edge. Only shown while that
-         looks possible: with no edge configured, or on a platform that ignores
-         the resize, the first attempt reports failure and the control goes away
-         rather than sitting there doing nothing. -->
     <button class="quick-tab-btn btn-icon" title={collapsed ? t("Развернуть из язычка") : t("Свернуть к краю")} onclick={toggleTab}>
       <Icon name={collapsed ? "expand" : "collapse"} />
     </button>
   {/if}
-  <button class="quick-close btn-icon" title={t("Закрыть")} onclick={cancel}>
-    <Icon name="x" />
-  </button>
+{/snippet}
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="container" onmousedown={startDrag}>
+  <!-- No ✕ in the corner. It was added in v0.10.32, when `decorations: false`
+       left no way at all to close the window with the mouse; since then every
+       mode grew its own button ("Отмена" when creating, "Закрыть" in the slot),
+       and Escape has always worked. What remained was a fourth way out sitting
+       exactly where the Ctrl-Tab hint sits, so the two drew over each other. -->
   {#if mode !== "pinned"}
     <!-- Tabs as plain text rather than a .seg control. The window has exactly one
          job, and a bordered segmented control at the top competed with the field
@@ -497,6 +499,7 @@
       <button class="tab" class:active={mode === "note"} onclick={() => mode = "note"}>{t("Заметка")}</button>
       <span class="tabs-spacer"></span>
       <kbd>Ctrl Tab</kbd>
+      {@render collapseBtn()}
     </div>
   {/if}
 
@@ -508,6 +511,8 @@
     {#if pinned}
       <div class="pin-head">
         <span class="pin-badge">⚡ {pinned.kind === "task" ? t("Задача") : t("Заметка")}</span>
+        <span class="tabs-spacer"></span>
+        {@render collapseBtn()}
       </div>
       <!-- svelte-ignore a11y_autofocus -->
       <input class="pin-title" bind:value={pinnedTitle} placeholder={t("Заголовок...")}
@@ -564,7 +569,10 @@
           {t("Закрепите задачу или заметку кнопкой-молнией в списке — этот хоткей будет открывать её сразу на правку.")}
         </p>
       </div>
-      <div class="buttons">
+      <!-- The last place still using the bare .buttons row; the footer band is
+           what every other mode of this window uses. -->
+      <div class="footer">
+        <span class="tabs-spacer"></span>
         <button class="btn-ghost" onclick={cancel}>{t("Закрыть")}</button>
       </div>
     {/if}
@@ -718,26 +726,15 @@
     color: var(--text-primary);
   }
 
-  /* Left of the close button, same corner. */
+  /* In the corner, but NOT absolutely positioned any more: the old ✕ floated
+     over the tab row and landed on the Ctrl-Tab hint. This one is a normal item
+     of the header row, so the row lays it out beside the hint instead of on top
+     of it. The slot and the empty slot have their own header rows for it. */
   .quick-tab-btn {
-    position: absolute;
-    top: 6px;
-    right: 30px;
-    z-index: 2;
+    flex-shrink: 0;
     color: var(--text-secondary);
   }
   .quick-tab-btn:hover {
-    color: var(--text-primary);
-  }
-
-  .quick-close {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    z-index: 2;
-    color: var(--text-secondary);
-  }
-  .quick-close:hover {
     color: var(--text-primary);
   }
 
@@ -826,12 +823,6 @@
   .field-with-voice :global(.voice-btn:hover),
   .field-with-voice :global(.voice-btn.recording) {
     opacity: 1;
-  }
-  .buttons {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-    margin-top: 2px;
   }
   /* The footer is a band rather than a row of buttons: it spans the full width by
      cancelling the container's side padding, and its own background separates

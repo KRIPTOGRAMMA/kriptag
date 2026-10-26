@@ -986,32 +986,54 @@ test("заметка из буфера: окно открывается пред
   expect(notes).toContain("Идея для доклада (правка)");
 });
 
-// Окно объявлено decorations: false, как и главное, поэтому системной рамки —
-// а с ней крестика и возможности таскать окно — нет. Главное окно возвращает то
-// и другое в WindowControls, быстрое не возвращало ничего: выйти можно было
-// только с клавиатуры. Кнопка есть во всех трёх режимах окна, а не только там,
-// где нарисована шапка.
-test("быстрое окно: крестик закрытия виден и рисуется", async ({ page }) => {
+// Окно объявлено decorations: false, поэтому системной рамки — а с ней крестика
+// — нет, и выход мышью приходится рисовать самим. Требование не «есть крестик в
+// углу», а «из КАЖДОГО режима можно выйти мышью»: угловой ✕ был снят в
+// v0.10.48, потому что ложился поверх подсказки Ctrl-Tab, и его роль разошлась
+// по кнопкам самих режимов.
+test("быстрое окно: из каждого режима есть выход мышью", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [] });
   await withMock(page);
   await page.goto("/quick-window.html");
-
-  const close = page.locator(".quick-close");
-  await expect(close).toBeVisible();
-  // Кнопка обязана что-то рисовать: Icon отдаёт пустой path для неизвестного
-  // имени, и тогда крестик кликабелен, но невидим (страж в iconNames.test.ts).
-  await expect(close.locator("svg path")).toHaveAttribute("d", /\S/);
+  // Создание задачи и заметки — одна и та же разметка с вкладками.
+  await expect(page.getByRole("button", { name: "Отмена" })).toBeVisible();
 });
 
-// Крестик нужен во всех режимах окна, а не только там, где есть шапка: в
-// закреплённом слоте своя разметка, и кнопка вынесена из потока именно поэтому.
-test("быстрое окно: крестик закрытия есть и в закреплённом слоте", async ({ page }) => {
+// У закреплённого слота своя разметка, у ПУСТОГО слота — третья, и до v0.10.48
+// в ней не было ни одной кнопки: единственным выходом мышью служил угловой ✕.
+test("быстрое окно: выход мышью есть и в пустом слоте", async ({ page }) => {
   await seedDb(page, { tasks: [], notes: [], projects: [], quickMode: "pinned" });
   await withMock(page);
   await page.goto("/quick-window.html");
 
   await expect(page.locator(".pin-empty-title")).toBeVisible();
-  await expect(page.locator(".quick-close")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Закрыть" })).toBeVisible();
+});
+
+// Подсказка Ctrl-Tab и кнопка сворачивания делят один угол. Пока кнопка была
+// позиционирована абсолютно, она ложилась поверх подсказки — именно это
+// пользователь и увидел. Проверяется пересечением прямоугольников, а не
+// наличием классов.
+test("быстрое окно: ничто не накладывается на подсказку Ctrl-Tab", async ({ page }) => {
+  await seedDb(page, { tasks: [], notes: [], projects: [] });
+  await withMock(page);
+  await page.setViewportSize({ width: 480, height: 340 });
+  await page.goto("/quick-window.html");
+
+  const overlap = await page.evaluate(() => {
+    const kbd = document.querySelector("kbd") as HTMLElement | null;
+    if (!kbd) return null;
+    const k = kbd.getBoundingClientRect();
+    // Любой другой интерактивный элемент окна, наехавший на подсказку.
+    const others = [...document.querySelectorAll("button")] as HTMLElement[];
+    return others.some(el => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      return r.left < k.right && r.right > k.left && r.top < k.bottom && r.bottom > k.top;
+    });
+  });
+  expect(overlap, "подсказка Ctrl-Tab нашлась").not.toBeNull();
+  expect(overlap, "что-то перекрывает подсказку Ctrl-Tab").toBe(false);
 });
 
 // Скопированная ссылка — самый частый случай этого хоткея, и голый URL в
