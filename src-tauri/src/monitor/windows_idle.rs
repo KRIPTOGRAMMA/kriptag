@@ -87,6 +87,17 @@ fn probe_idle_millis() -> Option<u32> {
     }
 
     // SAFETY: no arguments, no pointers — it just reads the system tick counter.
+    //
+    // GetTickCount does NOT advance while the machine is asleep or hibernating,
+    // and neither does dwTime. So on resume their difference is whatever it was
+    // when the machine went down — typically small — and this reports input that
+    // never happened, marking the user Active the instant the lid opens.
+    //
+    // That is only half the "it counted time while the computer was off" bug,
+    // and it is the harmless half: it misplaces at most one IDLE_TICK_SECS of
+    // state. The damaging half was the activity loop crediting a full interval
+    // per replayed tick; that is fixed in activity::credited_secs, which bounds
+    // every tick by the wall clock no matter what this function claims.
     let now = unsafe { GetTickCount() };
     Some(idle_millis(now, info.dwTime))
 }

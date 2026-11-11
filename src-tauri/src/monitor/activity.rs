@@ -112,6 +112,32 @@ pub fn step_idle(
     IdleTick { state: new_state, idle_since: new_idle_since, notify_return_mins }
 }
 
+/// How many seconds a tick may credit, given the wall-clock time since the
+/// previous one.
+///
+/// The loop used to credit `log_interval_secs` on every tick, which assumes a
+/// tick means that much real time passed. Suspend, hibernate and a clock jump
+/// all break that assumption, and tokio's default `MissedTickBehavior::Burst`
+/// makes it worse: after a stall it fires the backlog as fast as it can, so a
+/// machine asleep for eight hours woke up and credited eight hours of "Active"
+/// in a burst of back-to-back ticks — time the user provably was not at the
+/// computer, since the machine was off.
+///
+/// So the duration comes from the clock, and a tick that arrives late credits
+/// only what a tick is worth. A gap LONGER than one interval is not activity to
+/// be filled in: nobody was watched during it, and the honest record is that
+/// those seconds are simply absent from the log.
+///
+/// Returns 0 when the clock went backwards (NTP correction, timezone-less jump)
+/// — a negative duration is not a thing, and inventing a positive one would be
+/// the original bug mirrored.
+pub fn credited_secs(elapsed_secs: i64, log_interval_secs: u64) -> u64 {
+    if elapsed_secs <= 0 {
+        return 0;
+    }
+    (elapsed_secs as u64).min(log_interval_secs)
+}
+
 pub fn start_activity_loop(
     app: tauri::AppHandle,
     tracker: Arc<ActivityTracker>,
@@ -126,6 +152,13 @@ pub fn start_activity_loop(
 ) {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(log_interval_secs));
+        // A tick that was missed is not time the user spent at the computer, so
+        // never replay the backlog: after a suspend, Burst would fire every
+        // skipped tick at once. See credited_secs.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The wall clock of the previous tick, to measure what really elapsed
+        // rather than assume the interval.
+        let mut prev_tick = Utc::now();
         // A local prev_state: tracker.state is reset to Active immediately by
         // record_input, so an Idle->Active transition cannot be caught from it.
         let mut prev_state = ActivityState::Active;
@@ -134,6 +167,11 @@ pub fn start_activity_loop(
             tick.tick().await;
 
             let now = Utc::now();
+            // What the clock says passed, capped at one interval. A suspended or
+            // shut-down machine produces a huge gap here, and those seconds
+            // belong to nobody.
+            let credited = credited_secs((now - prev_tick).num_seconds(), log_interval_secs);
+            prev_tick = now;
             let last_input = *tracker.last_input.lock().unwrap();
 
             let step = step_idle(
@@ -166,11 +204,11 @@ pub fn start_activity_loop(
             match new_state {
                 ActivityState::Active => {
                     let mut secs = tracker.active_secs.lock().unwrap();
-                    *secs += log_interval_secs;
+                    *secs += credited;
                 }
                 ActivityState::Idle => {
                     let mut secs = tracker.idle_secs.lock().unwrap();
-                    *secs += log_interval_secs;
+                    *secs += credited;
                 }
             }
 
@@ -212,7 +250,7 @@ pub fn start_activity_loop(
             .bind(state_str)
             .bind(true)
             .bind(0i32)
-            .bind(log_interval_secs as i64)
+            .bind(credited as i64)
             .bind(focused_app)
             .bind(domain)
             .execute(&pool)
@@ -407,6 +445,37 @@ pub fn overlap_secs(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    // The computer was off, and the app still counted the time.
+    //
+    // The loop credited log_interval_secs per tick, which silently assumes a
+    // tick means that much real time. After a suspend tokio's default Burst
+    // behaviour replays the whole backlog at once, so a night of sleep arrived
+    // as hundreds of instant ticks, each crediting a full minute of "Active" —
+    // hours of work logged for a machine that was powered down.
+    //
+    // The pair is the point: a normal tick must still credit its interval, or a
+    // fix that simply returns 0 would "pass" while recording nothing at all.
+    #[test]
+    fn a_tick_after_a_suspend_credits_only_one_interval() {
+        // Normal cadence: the full interval, as before.
+        assert_eq!(credited_secs(60, 60), 60, "обычный тик должен считаться полностью");
+        // Slightly late: still just what elapsed.
+        assert_eq!(credited_secs(59, 60), 59);
+
+        // Eight hours asleep, then one tick. Before the fix this credited 60
+        // seconds per replayed tick; now the gap itself credits one interval and
+        // the rest of those seconds stay absent from the log, which is the truth.
+        assert_eq!(credited_secs(8 * 3600, 60), 60, "ночь сна не становится работой");
+    }
+
+    // A clock moved backwards (NTP correction) must not produce a negative or a
+    // wrapped-around huge duration — the original bug mirrored.
+    #[test]
+    fn a_backwards_clock_credits_nothing() {
+        assert_eq!(credited_secs(-3600, 60), 0);
+        assert_eq!(credited_secs(0, 60), 0);
+    }
     use super::*;
     use chrono::Duration as ChronoDuration;
 
