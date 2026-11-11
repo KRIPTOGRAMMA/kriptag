@@ -244,7 +244,50 @@ fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
     }
 }
 
-/// Moves the quick window to its docked edge, if one is configured.
+/// Reads the configured dock edge, or None when there is no database yet.
+async fn read_dock_edge(app: &tauri::AppHandle) -> DockEdge {
+    match app.try_state::<sqlx::SqlitePool>() {
+        Some(pool) => DockEdge::from_setting(
+            &commands::settings::get_setting(&pool, "quick_dock_edge")
+                .await
+                .unwrap_or_default(),
+        ),
+        None => DockEdge::None,
+    }
+}
+
+/// Puts the window against `edge` of the monitor's WORK AREA, in physical pixels.
+///
+/// The work area, not the full monitor size: `monitor.size()` includes the space
+/// under the taskbar, so a right-docked window was pushed behind it and a
+/// vertically centred one sat slightly low. Physical pixels throughout, because
+/// the work area's own origin is physical — mixing it with logical window sizes
+/// puts the window on the wrong monitor as soon as two displays have different
+/// DPI.
+///
+/// `win_w`/`win_h` are logical; the scale factor converts them here.
+fn place_on_edge(w: &tauri::WebviewWindow, edge: DockEdge, win_w: f64, win_h: f64) {
+    let Ok(Some(monitor)) = w.current_monitor() else { return };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    if let Some((x, y)) = dock_position(
+        edge,
+        area.size.width as f64,
+        area.size.height as f64,
+        win_w * scale,
+        win_h * scale,
+    ) {
+        let _ = w.set_position(tauri::PhysicalPosition::new(
+            area.position.x + x.round() as i32,
+            area.position.y + y.round() as i32,
+        ));
+    }
+}
+
+/// Opens the quick window FULL at its docked edge, if one is configured.
+///
+/// Expanding rather than only positioning: collapsing is a state the window
+/// keeps, so without this a window left as a tab reopened as a 28px sliver.
 ///
 /// Every failure here is ignored on purpose: docking is a convenience, and a
 /// window that opens centred is a working window. Never fall back to some other
@@ -260,28 +303,14 @@ fn show_quick_capture(app: &tauri::AppHandle, mode: &str) {
 ///
 /// Spawning is also the honest shape: the window is already visible by now, so
 /// nothing is waiting on this. Moving it a moment later is what docking is.
-fn apply_dock(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
+fn apply_dock(app: &tauri::AppHandle, _w: &tauri::WebviewWindow) {
     let app = app.clone();
-    let w = w.clone();
     tauri::async_runtime::spawn(async move {
-        let Some(pool) = app.try_state::<sqlx::SqlitePool>() else { return };
-        let edge = commands::settings::get_setting(&pool, "quick_dock_edge")
-            .await
-            .unwrap_or_default();
-        let edge = DockEdge::from_setting(&edge);
-        if edge == DockEdge::None {
-            return;
-        }
-
-        let Ok(Some(monitor)) = w.current_monitor() else { return };
-        let scale = monitor.scale_factor();
-        let work = monitor.size().to_logical::<f64>(scale);
-        let Ok(size) = w.outer_size() else { return };
-        let win = size.to_logical::<f64>(scale);
-
-        if let Some((x, y)) = dock_position(edge, work.width, work.height, win.width, win.height) {
-            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
-        }
+        // Showing the window always opens it FULL. Collapsing is a state the
+        // window keeps, so a hotkey press on a window left as a tab used to
+        // show a 28px sliver with the whole form inside it — unusable, and the
+        // user has no way back except finding the tab with the mouse.
+        set_quick_tab(&app, false).await;
     });
 }
 
@@ -297,16 +326,15 @@ fn apply_dock(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
 /// assumed success would show a collapsed tab over a full-size window.
 #[tauri::command]
 async fn toggle_quick_tab(app: tauri::AppHandle, collapsed: bool) -> bool {
+    set_quick_tab(&app, collapsed).await
+}
+
+/// Collapses to a tab or expands back, reporting the state the window ACTUALLY
+/// ended in. Shared by the command and by showing the window.
+async fn set_quick_tab(app: &tauri::AppHandle, collapsed: bool) -> bool {
     let Some(w) = app.get_webview_window(QUICK_WINDOW_LABEL) else { return false };
 
-    let edge = match app.try_state::<sqlx::SqlitePool>() {
-        Some(pool) => DockEdge::from_setting(
-            &commands::settings::get_setting(&pool, "quick_dock_edge")
-                .await
-                .unwrap_or_default(),
-        ),
-        None => DockEdge::None,
-    };
+    let edge = read_dock_edge(app).await;
     if edge == DockEdge::None {
         return false;
     }
@@ -314,7 +342,7 @@ async fn toggle_quick_tab(app: tauri::AppHandle, collapsed: bool) -> bool {
     // The full size comes from the config, not from the live window: once
     // collapsed, the window's own size IS the tab, so reading it would make
     // expanding impossible.
-    let (full_w, full_h) = quick_window_full_size(&app);
+    let (full_w, full_h) = quick_window_full_size(app);
     let (w_px, h_px) = tab_size(collapsed, full_w, full_h);
 
     if w.set_size(tauri::LogicalSize::new(w_px, h_px)).is_err() {
@@ -323,24 +351,34 @@ async fn toggle_quick_tab(app: tauri::AppHandle, collapsed: bool) -> bool {
 
     // Re-dock after resizing: the edge position depends on the width, so a
     // collapsed window would otherwise sit where the full one used to start.
-    if let Ok(Some(monitor)) = w.current_monitor() {
-        let scale = monitor.scale_factor();
-        let work = monitor.size().to_logical::<f64>(scale);
-        if let Some((x, y)) = dock_position(edge, work.width, work.height, w_px, h_px) {
-            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
-        }
+    place_on_edge(&w, edge, w_px, h_px);
+
+    if !collapsed {
+        let _ = w.set_focus();
     }
 
     // Report what actually happened rather than what was asked: on a platform
     // that ignores the resize, this stays false and the UI does not lie.
-    match w.outer_size() {
+    //
+    // The tolerance is generous because an undecorated window with a shadow is
+    // deliberately made WIDER than requested: tao adds the hidden border offsets
+    // to every set_inner_size (tao window.rs, `undecorated_with_shadows`), and
+    // `shadow` defaults to true. A strict 2px check called a perfectly collapsed
+    // window a failure. What distinguishes success is being near the tab width
+    // rather than near the full width, so compare against the midpoint.
+    let collapsed_now = match w.outer_size() {
         Ok(size) => {
             let scale = w.scale_factor().unwrap_or(1.0);
             let got = size.to_logical::<f64>(scale);
-            collapsed && (got.width - w_px).abs() < 2.0
+            got.width < (full_w + TAB_WIDTH) / 2.0
         }
         Err(_) => false,
-    }
+    };
+
+    // Tell the frontend the real state: it drives the collapse/expand icon, and
+    // showing the window expands it without the frontend having asked.
+    let _ = app.emit_to(QUICK_WINDOW_LABEL, "quick-tab", collapsed_now);
+    collapsed_now
 }
 
 /// The quick window's configured size, as declared in tauri.conf.json.
@@ -1192,6 +1230,30 @@ mod tests {
         let (x, _) = dock_position(DockEdge::Right, 1536.0, 864.0, w, h).unwrap();
         assert_eq!(x + w, 1536.0, "правый край язычка совпадает с краем экрана");
         assert!(x > 1536.0 - 480.0, "язычок должен стоять правее, чем полное окно");
+    }
+
+    // The dock used `monitor.size()`, which spans the whole display including
+    // the strip under the taskbar. On Windows a right-docked window therefore sat
+    // partly BEHIND the taskbar, and a vertically centred one sat low by half the
+    // taskbar's height. The fix feeds the work area in instead; this pins the
+    // arithmetic so a future caller cannot quietly pass the full size again.
+    #[test]
+    fn docking_uses_the_work_area_not_the_whole_screen() {
+        let (w, h) = tab_size(true, 480.0, 340.0);
+        // 1080-tall screen with a 40px taskbar at the bottom.
+        let full = dock_position(DockEdge::Right, 1920.0, 1080.0, w, h).unwrap();
+        let work = dock_position(DockEdge::Right, 1920.0, 1040.0, w, h).unwrap();
+
+        // The taskbar is at the bottom, so x is unaffected and y must move UP.
+        assert_eq!(full.0, work.0, "горизонтальный край от панели не зависит");
+        assert!(
+            work.1 < full.1,
+            "по рабочей области язычок должен стоять выше: {} vs {}",
+            work.1,
+            full.1
+        );
+        // Centred within the work area, not within the screen.
+        assert_eq!(work.1, (1040.0 - h) / 2.0);
     }
 
     // v0.10.38 put `block_on` into apply_dock, which show_quick_capture calls.

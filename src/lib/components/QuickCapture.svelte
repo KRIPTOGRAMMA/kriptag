@@ -130,7 +130,11 @@
     categoryStore.load();
     // A live mode change while the window is open.
     const un = listen<string>("quick-mode", (e) => { applyMode(e.payload); });
-    return () => { un.then((f) => f()); };
+    // The backend changes the collapsed state on its own: showing the window
+    // always expands it, so a window left as a tab opens full on the next
+    // hotkey. Without this the icon would still say "expand" over a full window.
+    const unTab = listen<boolean>("quick-tab", (e) => { collapsed = e.payload; });
+    return () => { un.then((f) => f()); unTab.then((f) => f()); };
   });
 
   function reset() {
