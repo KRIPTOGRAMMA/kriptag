@@ -28,16 +28,21 @@ pub async fn get_activity_by_day(pool: State<'_, SqlitePool>) -> AppResult<Vec<A
 }
 
 pub async fn get_activity_by_day_impl(pool: &SqlitePool) -> AppResult<Vec<ActivityDay>> {
+    // Bucketed by the middle of each tick's period, like get_hourly_activity: the
+    // stored timestamp is the period's END, so a tick measured just before local
+    // midnight would otherwise be credited to the following day.
+    //
     // Local days, like get_task_completions_by_day: timestamps are stored in UTC,
     // but the user's day is local, and this date is shown to them verbatim as the
     // bar's label. Grouping by the UTC date put evening or early-morning work on
     // the neighbouring square, so the activity calendar and the completion
     // calendar disagreed about the same instant.
     let rows = sqlx::query(
-        "SELECT date(timestamp, 'localtime') as date, SUM(duration_secs) / 60 as minutes
+        "SELECT date(datetime(timestamp, (-duration_secs / 2) || ' seconds'), 'localtime') as date,
+                SUM(duration_secs) / 60 as minutes
          FROM activity_log
          WHERE state = 'Active'
-         GROUP BY date(timestamp, 'localtime')"
+         GROUP BY date(datetime(timestamp, (-duration_secs / 2) || ' seconds'), 'localtime')"
     )
     .fetch_all(pool)
     .await?;
@@ -496,8 +501,15 @@ pub async fn get_hourly_activity(pool: State<'_, SqlitePool>, days: i64) -> AppR
 pub async fn get_hourly_activity_impl(pool: &SqlitePool, days: i64) -> AppResult<Vec<HourCell>> {
     let since = format!("-{} days", days.max(1));
     let rows = sqlx::query(
-        "SELECT CAST(strftime('%w', timestamp, 'localtime') AS INTEGER) AS weekday,
-                CAST(strftime('%H', timestamp, 'localtime') AS INTEGER) AS hour,
+        // Bucket by the MIDDLE of the period a tick measured, not by its
+        // timestamp. The timestamp is the period's end (see the INSERT in
+        // monitor::activity), so a tick finishing on the hour would otherwise be
+        // credited entirely to the hour after the one actually worked. The
+        // midpoint also handles a tick straddling a boundary: it lands in
+        // whichever hour holds most of it, which is the best a single bucket can
+        // do without splitting the row.
+        "SELECT CAST(strftime('%w', datetime(timestamp, (-duration_secs / 2) || ' seconds'), 'localtime') AS INTEGER) AS weekday,
+                CAST(strftime('%H', datetime(timestamp, (-duration_secs / 2) || ' seconds'), 'localtime') AS INTEGER) AS hour,
                 SUM(duration_secs) / 60 AS minutes
          FROM activity_log
          WHERE state = 'Active'
@@ -895,6 +907,38 @@ mod tests {
             hour: local.hour() as i64,
             minutes: 15,
         }]);
+    }
+
+    // The same end-vs-start confusion as get_block_idle, in the hour heatmap:
+    // a tick's timestamp is the END of what it measured, so a tick finishing
+    // exactly on the hour belongs to the hour BEFORE it.
+    //
+    // The existing test above cannot catch this — it places the tick at minute 10,
+    // where start and end share an hour. Here the tick measures a full hour and
+    // ends on the boundary, so the correct bucket and the buggy one differ.
+    #[tokio::test]
+    async fn hourly_activity_credits_the_hour_the_work_happened_in() {
+        use chrono::{Datelike, Duration, Local, Timelike, Utc};
+        let pool = test_pool().await;
+
+        // A tick ending exactly on an hour boundary, measuring the whole hour
+        // before it. Three hours back so it stays inside the 7-day window.
+        let end = (Utc::now() - Duration::hours(3))
+            .with_minute(0).unwrap()
+            .with_second(0).unwrap()
+            .with_nanosecond(0).unwrap();
+        log(&pool, &end.to_rfc3339(), "Active", 3600).await;
+
+        let cells = get_hourly_activity_impl(&pool, 7).await.unwrap();
+        // The work happened in the hour BEFORE the timestamp.
+        let worked = (end - Duration::hours(1)).with_timezone(&Local);
+        assert_eq!(cells.len(), 1, "один тик — одна ячейка");
+        assert_eq!(
+            (cells[0].weekday, cells[0].hour),
+            (worked.weekday().num_days_from_sunday() as i64, worked.hour() as i64),
+            "час должен быть тем, в котором шла работа, а не тем, в котором тик записался"
+        );
+        assert_eq!(cells[0].minutes, 60);
     }
 
     async fn insert_task(pool: &SqlitePool, id: &str, category: &str, completed_at: Option<&str>) {
