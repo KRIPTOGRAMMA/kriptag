@@ -153,9 +153,17 @@ pub fn start_activity_loop(
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(log_interval_secs));
         // A tick that was missed is not time the user spent at the computer, so
-        // never replay the backlog: after a suspend, Burst would fire every
-        // skipped tick at once. See credited_secs.
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // never replay the backlog: after a suspend, the default Burst would fire
+        // every skipped tick at once. See credited_secs.
+        //
+        // Skip rather than Delay, which also refuses the backlog but reschedules
+        // from completion (`now + period`, tokio interval.rs) instead of from the
+        // fixed grid. tokio consults that whenever a tick overruns by more than
+        // 5ms, so with Delay the real cadence becomes period + body time, and the
+        // body's seconds — a settings read, a compositor round-trip, an INSERT —
+        // would be silently dropped by the cap below, over and over. Skip keeps
+        // the grid by subtracting the overshoot modulo the period.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The wall clock of the previous tick, to measure what really elapsed
         // rather than assume the interval.
         let mut prev_tick = Utc::now();

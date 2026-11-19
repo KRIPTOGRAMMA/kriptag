@@ -94,10 +94,15 @@ fn probe_idle_millis() -> Option<u32> {
     // never happened, marking the user Active the instant the lid opens.
     //
     // That is only half the "it counted time while the computer was off" bug,
-    // and it is the harmless half: it misplaces at most one IDLE_TICK_SECS of
-    // state. The damaging half was the activity loop crediting a full interval
-    // per replayed tick; that is fixed in activity::credited_secs, which bounds
-    // every tick by the wall clock no matter what this function claims.
+    // and it is the lesser half: it mislabels at most one activity-loop tick as
+    // Active — log_interval_secs, so 60s by default and up to 600s, NOT the 15s
+    // IDLE_TICK_SECS of this module, because it is that loop which records the
+    // state. It does not persist: after resume GetTickCount advances again while
+    // dwTime stays frozen, so the difference grows normally from there.
+    //
+    // The damaging half was the activity loop crediting a full interval per
+    // replayed tick; that is fixed in activity::credited_secs, which bounds every
+    // tick by the wall clock no matter what this function claims.
     let now = unsafe { GetTickCount() };
     Some(idle_millis(now, info.dwTime))
 }
