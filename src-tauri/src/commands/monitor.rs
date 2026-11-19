@@ -28,11 +28,16 @@ pub async fn get_activity_by_day(pool: State<'_, SqlitePool>) -> AppResult<Vec<A
 }
 
 pub async fn get_activity_by_day_impl(pool: &SqlitePool) -> AppResult<Vec<ActivityDay>> {
+    // Local days, like get_task_completions_by_day: timestamps are stored in UTC,
+    // but the user's day is local, and this date is shown to them verbatim as the
+    // bar's label. Grouping by the UTC date put evening or early-morning work on
+    // the neighbouring square, so the activity calendar and the completion
+    // calendar disagreed about the same instant.
     let rows = sqlx::query(
-        "SELECT date(timestamp) as date, SUM(duration_secs) / 60 as minutes
+        "SELECT date(timestamp, 'localtime') as date, SUM(duration_secs) / 60 as minutes
          FROM activity_log
          WHERE state = 'Active'
-         GROUP BY date(timestamp)"
+         GROUP BY date(timestamp, 'localtime')"
     )
     .fetch_all(pool)
     .await?;
@@ -93,10 +98,16 @@ pub async fn get_active_idle_ratio(pool: State<'_, SqlitePool>) -> AppResult<Act
 }
 
 pub async fn get_active_idle_ratio_impl(pool: &SqlitePool) -> AppResult<ActiveIdleRatio> {
+    // "Today" and "this week" are local spans: at 02:00 in UTC+5 a UTC-based
+    // "today" still reports yesterday's figures, which is precisely when the user
+    // is looking at a fresh day and seeing stale numbers.
     let (today_active, today_idle) =
-        state_sums(pool, "date(timestamp) = date('now')").await?;
-    let (week_active, week_idle) =
-        state_sums(pool, "date(timestamp) >= date('now','-6 days')").await?;
+        state_sums(pool, "date(timestamp, 'localtime') = date('now', 'localtime')").await?;
+    let (week_active, week_idle) = state_sums(
+        pool,
+        "date(timestamp, 'localtime') >= date('now', 'localtime', '-6 days')",
+    )
+    .await?;
     Ok(ActiveIdleRatio { today_active, today_idle, week_active, week_idle })
 }
 
@@ -123,7 +134,7 @@ pub async fn get_block_idle_impl(pool: &SqlitePool, date: &str) -> AppResult<Vec
         "SELECT id, title, scheduled_at, COALESCE(scheduled_mins, 60) AS mins
          FROM tasks
          WHERE deleted_at IS NULL AND scheduled_at IS NOT NULL
-           AND date(scheduled_at) = date(?)
+           AND date(scheduled_at, 'localtime') = date(?)
          ORDER BY scheduled_at"
     )
     .bind(date)
@@ -132,7 +143,7 @@ pub async fn get_block_idle_impl(pool: &SqlitePool, date: &str) -> AppResult<Vec
 
     let ticks = sqlx::query(
         "SELECT timestamp, duration_secs, state FROM activity_log
-         WHERE date(timestamp) = date(?)"
+         WHERE date(timestamp, 'localtime') = date(?)"
     )
     .bind(date)
     .fetch_all(pool)
@@ -486,7 +497,8 @@ pub async fn get_hourly_activity_impl(pool: &SqlitePool, days: i64) -> AppResult
                 CAST(strftime('%H', timestamp, 'localtime') AS INTEGER) AS hour,
                 SUM(duration_secs) / 60 AS minutes
          FROM activity_log
-         WHERE state = 'Active' AND date(timestamp) >= date('now', ?)
+         WHERE state = 'Active'
+           AND date(timestamp, 'localtime') >= date('now', 'localtime', ?)
          GROUP BY weekday, hour",
     )
     .bind(&since)
@@ -696,6 +708,95 @@ mod tests {
         assert_eq!(days.len(), 2);
         assert_eq!((days[0].date.as_str(), days[0].completed), ("2026-07-01", 2));
         assert_eq!((days[1].date.as_str(), days[1].completed), ("2026-07-02", 1));
+    }
+
+    // The activity calendar and the completion calendar must agree about which
+    // day an evening tick belongs to.
+    //
+    // Activity was grouped by the UTC date while completions use 'localtime', so
+    // for anyone not on UTC the two squares disagreed: work logged at 02:00 local
+    // in UTC+5 landed on the previous UTC day, and the dashboard showed minutes
+    // on a day with no completed tasks while the task itself sat on the next one.
+    // The date string here is also shown to the user verbatim as a day label.
+    //
+    // Built from the local midnight boundary so it fails wherever the machine's
+    // offset is non-zero, rather than only in one timezone. On a UTC machine
+    // local and UTC agree by definition and there is nothing to catch: the test
+    // then only asserts the two commands match, which must hold everywhere.
+    // get_block_idle is handed a LOCAL day key by the calendar (Calendar.svelte
+    // builds it with localDateKey), but filtered both blocks and ticks by the UTC
+    // date. A block scheduled just after local midnight was therefore invisible
+    // on its own day, and the plan-versus-actual bar for it stayed empty.
+    #[tokio::test]
+    async fn block_idle_finds_a_block_scheduled_just_after_local_midnight() {
+        use chrono::{Local, TimeZone};
+        let pool = test_pool().await;
+
+        let local_day = Local::now().date_naive();
+        let at = Local
+            .from_local_datetime(&local_day.and_hms_opt(0, 30, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_utc();
+
+        sqlx::query(
+            "INSERT INTO tasks (id, title, status, priority, category, tags, recurrence, hidden, created_at, updated_at, scheduled_at, scheduled_mins)
+             VALUES ('b1', 'ночной блок', 'Todo', 'Medium', 'Work', '[]', 'None', 1, ?, ?, ?, 60)")
+            .bind(at.to_rfc3339()).bind(at.to_rfc3339()).bind(at.to_rfc3339())
+            .execute(&pool).await.unwrap();
+        // Ten idle minutes inside that block.
+        log(&pool, &at.to_rfc3339(), "Idle", 600).await;
+
+        let key = local_day.format("%Y-%m-%d").to_string();
+        let rows = get_block_idle_impl(&pool, &key).await.unwrap();
+        assert_eq!(rows.len(), 1, "блок должен найтись по своему локальному дню");
+        assert_eq!(rows[0].task_id, "b1");
+        assert_eq!(rows[0].planned_mins, 60);
+        assert_eq!(rows[0].idle_mins, 10, "простой внутри блока должен попасть в выборку");
+    }
+
+    #[tokio::test]
+    async fn activity_days_use_the_same_local_day_as_completions() {
+        use chrono::{Local, TimeZone, Timelike};
+        let pool = test_pool().await;
+
+        // 30 minutes past local midnight today: the instant most likely to sit on
+        // a different UTC date than the local one.
+        let local_key = Local::now().date_naive();
+        let just_after_midnight = local_key.and_hms_opt(0, 30, 0).unwrap();
+        let utc = Local
+            .from_local_datetime(&just_after_midnight)
+            .single()
+            .unwrap()
+            .to_utc();
+
+        log(&pool, &utc.to_rfc3339(), "Active", 600).await;
+        sqlx::query(
+            "INSERT INTO tasks (id, title, status, priority, category, tags, recurrence, hidden, created_at, updated_at, completed_at)
+             VALUES ('t1', 'сделана ночью', 'Done', 'Medium', 'Work', '[]', 'None', 1, ?, ?, ?)")
+            .bind(utc.to_rfc3339()).bind(utc.to_rfc3339()).bind(utc.to_rfc3339())
+            .execute(&pool).await.unwrap();
+
+        let key = local_key.format("%Y-%m-%d").to_string();
+        let activity = get_activity_by_day_impl(&pool).await.unwrap();
+        let completions = get_task_completions_by_day_impl(&pool).await.unwrap();
+
+        assert_eq!(activity.len(), 1, "одна запись — один день");
+        assert_eq!(completions.len(), 1);
+        // The substantive assertion: both calendars put the same instant on the
+        // same square, and that square is the LOCAL day the user lived through.
+        assert_eq!(
+            activity[0].date, completions[0].date,
+            "активность и выполнения должны попадать в один и тот же день"
+        );
+        assert_eq!(
+            activity[0].date, key,
+            "день должен быть локальным, а не UTC (смещение машины: {})",
+            Local::now().offset()
+        );
+        // Sanity: the minutes themselves still arrive.
+        assert_eq!(activity[0].minutes, 10);
+        let _ = just_after_midnight.hour();
     }
 
     #[tokio::test]
