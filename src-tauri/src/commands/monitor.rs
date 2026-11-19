@@ -150,12 +150,15 @@ pub async fn get_block_idle_impl(pool: &SqlitePool, date: &str) -> AppResult<Vec
     .await?;
 
     // Parse the ticks once rather than inside the loop over blocks.
+    //
+    // A row's timestamp is the END of the period it measured (see the INSERT in
+    // monitor::activity), so the interval is [timestamp - duration, timestamp).
     let parsed: Vec<(i64, i64, bool)> = ticks.iter().filter_map(|r| {
         let ts: String = r.get("timestamp");
-        let start = parse_ts(&ts)?;
+        let end = parse_ts(&ts)?;
         let dur: i64 = r.get("duration_secs");
         let state: String = r.get("state");
-        Some((start, start + dur, state == "Idle"))
+        Some((end - dur, end, state == "Idle"))
     }).collect();
 
     let mut out = Vec::new();
@@ -520,6 +523,9 @@ mod tests {
         pool
     }
 
+    // `ts` is the tick's END, matching what the activity loop writes: a tick
+    // fires, then records the period that just elapsed. So a row (14:01, 60)
+    // describes 14:00-14:01, not 14:01-14:02.
     async fn log(pool: &SqlitePool, ts: &str, state: &str, duration_secs: i64) {
         sqlx::query(
             "INSERT INTO activity_log (timestamp, state, app_focused, input_events, duration_secs)
@@ -600,10 +606,12 @@ mod tests {
         block(&pool, "t1", "работа", "2026-07-01T14:00:00+00:00", 60).await;
 
         // 20 minutes active, 10 minutes idle — inside the block
-        for i in 0..20 {
+        // Ticks ENDING at 14:01..14:20 cover 14:00-14:20.
+        for i in 1..=20 {
             log(&pool, &format!("2026-07-01T14:{:02}:00+00:00", i), "Active", 60).await;
         }
-        for i in 20..30 {
+        // Ticks ENDING at 14:21..14:30 cover 14:20-14:30.
+        for i in 21..=30 {
             log(&pool, &format!("2026-07-01T14:{:02}:00+00:00", i), "Idle", 60).await;
         }
 
@@ -622,13 +630,14 @@ mod tests {
         let pool = test_pool().await;
         block(&pool, "t1", "встреча", "2026-07-01T14:00:00+00:00", 30).await;
 
-        // Before and after the block — must not be counted
+        // Before and after the block — must not be counted. Ends chosen so the
+        // periods themselves fall outside 14:00-14:30.
         log(&pool, "2026-07-01T13:00:00+00:00", "Active", 60).await;
-        log(&pool, "2026-07-01T13:59:00+00:00", "Idle", 60).await;
-        log(&pool, "2026-07-01T14:30:00+00:00", "Active", 60).await;
-        log(&pool, "2026-07-01T15:00:00+00:00", "Idle", 60).await;
-        // Inside the block — 5 minutes idle
-        for i in 0..5 {
+        log(&pool, "2026-07-01T14:00:00+00:00", "Idle", 60).await;
+        log(&pool, "2026-07-01T15:00:00+00:00", "Active", 60).await;
+        log(&pool, "2026-07-01T16:00:00+00:00", "Idle", 60).await;
+        // Inside the block — ticks ending 14:01..14:05 cover 14:00-14:05.
+        for i in 1..=5 {
             log(&pool, &format!("2026-07-01T14:{:02}:00+00:00", i), "Idle", 60).await;
         }
 
@@ -637,13 +646,49 @@ mod tests {
         assert_eq!(r[0].active_mins, 0);
     }
 
+    // The reader treated a row's timestamp as the START of its period, but the
+    // activity loop writes it as the END: the tick fires, then records the time
+    // that just elapsed. Every tick was therefore attributed one whole interval
+    // into the future.
+    //
+    // This isolates the shift, which the other tests cannot: a tick aligned to a
+    // block's boundary overlaps it under either convention. Here the tick lies
+    // entirely BEFORE the block under the correct reading and entirely INSIDE it
+    // under the wrong one, so the two differ by the whole tick.
+    #[tokio::test]
+    async fn a_tick_is_credited_to_the_period_it_measured_not_the_next_one() {
+        let pool = test_pool().await;
+        // A 14:00-15:00 block.
+        block(&pool, "t1", "работа", "2026-07-01T14:00:00+00:00", 60).await;
+
+        // A tick ending exactly when the block begins: it measured 13:00-14:00,
+        // which is before the block and must count for nothing. Read as a start
+        // it would have claimed 14:00-15:00 — the entire block, as idle.
+        log(&pool, "2026-07-01T14:00:00+00:00", "Idle", 3600).await;
+
+        let r = get_block_idle_impl(&pool, "2026-07-01").await.unwrap();
+        assert_eq!(r.len(), 1, "блок должен найтись");
+        assert_eq!(
+            r[0].idle_mins, 0,
+            "тик, измеривший час ДО блока, не должен засчитываться в блок"
+        );
+
+        // The control case: a tick that really did measure the block's first hour
+        // ends when the block ends, and must count in full. Without this a reader
+        // that credits nothing at all would pass the assertion above.
+        log(&pool, "2026-07-01T15:00:00+00:00", "Idle", 3600).await;
+        let r = get_block_idle_impl(&pool, "2026-07-01").await.unwrap();
+        assert_eq!(r[0].idle_mins, 60, "тик, измеривший сам блок, засчитывается целиком");
+    }
+
     #[tokio::test]
     async fn block_idle_counts_partial_tick_overlap() {
         let pool = test_pool().await;
         // A 14:00-14:10 block
         block(&pool, "t1", "короткий", "2026-07-01T14:00:00+00:00", 10).await;
-        // A long idle tick 13:55-14:55: only 10 minutes fall inside the block
-        log(&pool, "2026-07-01T13:55:00+00:00", "Idle", 3600).await;
+        // A long idle tick covering 13:55-14:55 (so it ENDS at 14:55): only the
+        // block's own 10 minutes fall inside it.
+        log(&pool, "2026-07-01T14:55:00+00:00", "Idle", 3600).await;
 
         let r = get_block_idle_impl(&pool, "2026-07-01").await.unwrap();
         assert_eq!(r[0].idle_mins, 10);
@@ -744,8 +789,10 @@ mod tests {
              VALUES ('b1', 'ночной блок', 'Todo', 'Medium', 'Work', '[]', 'None', 1, ?, ?, ?, 60)")
             .bind(at.to_rfc3339()).bind(at.to_rfc3339()).bind(at.to_rfc3339())
             .execute(&pool).await.unwrap();
-        // Ten idle minutes inside that block.
-        log(&pool, &at.to_rfc3339(), "Idle", 600).await;
+        // Ten idle minutes inside that block: a tick ENDING ten minutes after the
+        // block starts covers exactly the block's first ten minutes.
+        let tick_end = at + chrono::Duration::minutes(10);
+        log(&pool, &tick_end.to_rfc3339(), "Idle", 600).await;
 
         let key = local_day.format("%Y-%m-%d").to_string();
         let rows = get_block_idle_impl(&pool, &key).await.unwrap();

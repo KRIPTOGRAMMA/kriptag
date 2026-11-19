@@ -250,6 +250,11 @@ pub fn start_activity_loop(
             };
             let focused_app = window.map(|w| w.app);
 
+            // `timestamp` is the END of the period this row describes: the tick
+            // fires, and only then is the elapsed time known. So the row covers
+            // [timestamp - duration_secs, timestamp). Anything reconstructing an
+            // interval from a row must subtract, not add — get_block_idle added,
+            // and so attributed every tick one interval into the future.
             let result = sqlx::query(
                 "INSERT INTO activity_log (timestamp, state, app_focused, input_events, duration_secs, app, domain)
                  VALUES (?, ?, ?, ?, ?, ?, ?)"
